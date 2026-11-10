@@ -35,7 +35,8 @@ const CHECK_FAIL = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRE
 const CHECK_STUCK_MS = 90 * 60000; // pending this long (codecov, say) never finishes
 const GH = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
 
-// A PR from `gh pr view --json` as one state and a tooltip. Failing CI wins, then draft.
+// A PR from `gh pr view --json` as one state and a tooltip. Draft wins: CI only
+// matters once a PR is open for review.
 export function prState(pr, now = Date.now()) {
   if (!pr) return null;
   if (pr.state === "MERGED") return { state: "merged", tip: `#${pr.number} merged` };
@@ -47,19 +48,18 @@ export function prState(pr, now = Date.now()) {
     const started = Date.parse(c.startedAt ?? "");
     return waiting && !(started && now - started > CHECK_STUCK_MS);
   });
+  if (pr.isDraft) return { state: "draft", tip: `#${pr.number} draft` };
   const state = failed.length ? "failing"
-    : pr.isDraft ? "draft"
     : pr.mergeable === "CONFLICTING" ? "conflict"
     : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes"
     : pending.length ? "running"
     : pr.reviewDecision === "APPROVED" ? "approved"
     : "review";
   const parts = [`#${pr.number}`];
-  if (pr.isDraft) parts.push("draft");
   if (failed.length) parts.push(`${failed.length} check${failed.length === 1 ? "" : "s"} failing`);
   else if (pending.length) parts.push(`${pending.length} check${pending.length === 1 ? "" : "s"} running`);
   if (pr.mergeable === "CONFLICTING") parts.push("merge conflict");
-  if (!pr.isDraft) parts.push(pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes requested" : "waiting on review");
+  parts.push(pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes requested" : "waiting on review");
   return { state, tip: parts.join(" · ") };
 }
 
