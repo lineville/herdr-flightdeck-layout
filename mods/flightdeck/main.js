@@ -1,7 +1,8 @@
 // Flight Deck: a cockpit view of the fleet. Every space (a repo) is a planet; its agents
 // are craft that launch when they start work, orbit while they work, hold when they need
-// you, and land when they are done. Each craft's orbit takes its worktree's color, so the
-// craft working in one branch share a hue. Sub-agents circle their parent.
+// you, and land when they are done. Orbits are muted gray dotted rings; each craft's tag
+// takes its worktree's color, so craft working in one branch share a hue. Sub-agents circle
+// their parent.
 // Fleet mode lays the planets out on a grid that fits the view; System mode shows one.
 // Styled dark and flat: grayscale, one cyan accent (#2EE6FF), IBM Plex Sans and Mono.
 
@@ -56,6 +57,7 @@ const ORBIT_HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c
 const orbitHue = (slot) => ORBIT_HUES[slot % ORBIT_HUES.length];
 // Space colors, the same as the sidebar's avatars.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
+const ORBIT_GRAY = C.fg2; // orbits stay neutral so they don't compete with the craft
 const ORBIT_NEAR_ALPHA = "8c"; // 55%
 const ORBIT_FAR_ALPHA = "4d"; // 30%
 const ORBIT_DOTS = [1.5, 5];
@@ -533,7 +535,7 @@ export default class FlightDeck extends View {
   cockpit(vp, shown, list, tabs) {
     const { yaw, pitch, zoom } = this.look;
     const tops = [...this.craft.values()].filter((c) => this.cams.has(c.space) && !c.parent);
-    const key = `${vp.w}x${vp.h}:${yaw}:${pitch}:${zoom}:${this.cells.map((c) => `${c.space.id}@${c.x},${c.y},${c.w},${c.h}`).join("|")}:${tops.map((c) => `${c.space}/${c.slot}@${c.r.toFixed(2)}${this.hue(c)}`).sort().join(",")}`;
+    const key = `${vp.w}x${vp.h}:${yaw}:${pitch}:${zoom}:${this.cells.map((c) => `${c.space.id}@${c.x},${c.y},${c.w},${c.h}`).join("|")}:${tops.map((c) => `${c.space}/${c.slot}@${c.r.toFixed(2)}`).sort().join(",")}`;
     if (!this.orbitCache || this.orbitCache.key !== key) {
       const build = (runs) => runs.filter((r) => r.length > 1).map((r) => {
         let path = PathBuilder.stroke(this.cells.length > 1 ? 1.2 : 1.5).dash_array(ORBIT_DOTS).move_to(r[0][0], r[0][1]);
@@ -542,8 +544,7 @@ export default class FlightDeck extends View {
       });
       const rings = tops.map((c) => {
         const p = orbitPaths(this.cams.get(c.space), orbitOf(c.slot, c.r));
-        const hue = this.hue(c);
-        return { far: build(p.far), near: build(p.near), farColor: `${hue}${ORBIT_FAR_ALPHA}`, nearColor: `${hue}${ORBIT_NEAR_ALPHA}` };
+        return { far: build(p.far), near: build(p.near), farColor: `${ORBIT_GRAY}${ORBIT_FAR_ALPHA}`, nearColor: `${ORBIT_GRAY}${ORBIT_NEAR_ALPHA}` };
       });
       this.orbitCache = { key, rings };
     }

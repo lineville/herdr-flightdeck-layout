@@ -1,6 +1,6 @@
 # Flight Deck layout
 
-Herdr's main layout reorganised around repos, worktrees and agents, with Flight Deck docked beside your work. The sidebar is one tree: each space is a repo, under it each worktree you've opened (it stays after its terminals close), under each worktree its agents. On the right, Flight Deck shows every space as a planet, with each agent as a craft orbiting in its worktree's color: it launches when it starts work, orbits while it works, holds when it needs you, and lands when it's done.
+Herdr's main layout reorganised around repos, worktrees and agents, with Flight Deck docked beside your work. The sidebar is one tree: each space is a repo, under it each worktree you've opened (it stays after its terminals close), under each worktree its agents. On the right, Flight Deck shows every space as a planet, with each agent as a craft on a muted gray orbit, its branch label in its worktree's color: it launches when it starts work, orbits while it works, holds when it needs you, and lands when it's done.
 
 ![Flight Deck layout](preview.png)
 
@@ -65,7 +65,7 @@ The window keeps the person's own theme and fonts; Flight Deck draws on its own 
 - `layout.switch {name: "flightdeck"}` shows the tree, the tab bar with worktree dots, the shown tab on the left and Flight Deck on the right.
 - A space on a repo shows a `main` worktree row with its agents under it; New worktree from the space's `+` adds a colored worktree row with Pi running under it, as a tab in the same space.
 - Closing every tab of a worktree leaves its row in the tree, branch in `muted`; clicking it opens a terminal there, and Hide from sidebar removes it.
-- The worktree's dot, its tabs' dots and its agents' orbits in Flight Deck share one color.
+- The worktree's dot, its tabs' dots and its agents' branch labels in Flight Deck share one color.
 - With two spaces open, Flight Deck shows two planets, and clicking one switches space.
 - Remove worktree closes its tabs, keeps the space, and deletes the checkout.
 - `ctrl-shift-l` cycles back to the person's own layout, unchanged.
