@@ -409,7 +409,7 @@ export default class Spaces extends View {
     openOverlay({ mod: "deck-menu", kind: "popup", width: 220, height, props });
   }
 
-  // Height of the worktree menu: a branch label, then its items (see deck-menu).
+  // Height of the worktree menu: a branch label, then its items or its agents (see deck-menu).
   worktreeMenu(s, g) {
     const { pr, ticket } = this.links(g);
     const mine = s.tabs.filter((tab) => {
@@ -417,8 +417,11 @@ export default class Spaces extends View {
       return ps.length && ps.every((x) => x.cwd && inside(x.cwd, g.path));
     });
     const empty = g.panes.length === 0;
-    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0);
-    this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, empty, pr, ticket }, 36 + count * 30);
+    const count = 2 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0);
+    // The Open agent sub-panel: a back row, then the installed agents deck-menu last saw.
+    const known = (shared("new-menu.agents")?.[s.machine ?? ""] ?? []).filter((a) => a.installed).length;
+    const sub = 1 + Math.max(known, 1);
+    this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, empty, pr, ticket }, 36 + Math.max(count, sub) * 30);
   }
 
   spaceRow(s, groups, fill, t) {
