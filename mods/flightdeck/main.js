@@ -61,6 +61,7 @@ const ORBIT_FAR_ALPHA = "4d"; // 30%
 const ORBIT_DOTS = [1.5, 5];
 
 const HUD_H = 40;
+const EDGE = 16; // inset of the cockpit readouts, matching the top bar's padding
 const ROW_H = 34;
 const HEAD_H = 24;
 const FAST_MS = 220; // ticks while a craft launches or lands
@@ -588,7 +589,6 @@ export default class FlightDeck extends View {
       .children(this.cells.flatMap((cell) => this.planet(cell, list)))
       .children(nearRings)
       .children(bodies)
-      .child(this.canopy(vp))
       .child(this.readout(vp, shown, list))
       .child(this.viewControls(vp, moved))
       .when(shown.length === 0, (el) => el.child(v_flex().absolute().left(0).w(vp.w).top(vp.h / 2 - 20).items_center().gap(4)
@@ -656,9 +656,8 @@ export default class FlightDeck extends View {
   }
 
   viewControls(vp, moved) {
-    const inset = Math.max(24, vp.w * 0.05) + 8;
     const fleet = this.cells.length > 1;
-    return h_flex().absolute().left(inset).bottom(30).gap(10).items_center()
+    return h_flex().absolute().left(EDGE).bottom(EDGE).gap(10).items_center()
       .when(vp.w >= 480, (el) => el.child(mono(10, C.fg3, 500).child(fleet ? "DRAG TO TURN · SCROLL TO ZOOM · DOUBLE-CLICK A PLANET" : "DRAG TO TURN · SCROLL TO ZOOM")))
       .when(moved, (el) => el.child(h_flex().id("reset-view").h(22).px(8).items_center().rounded(4).border(1).border_color(C.border).bg(C.bg).cursor_pointer()
         .hover((st) => st.bg(C.surface2).border_color(C.borderActive))
@@ -672,36 +671,14 @@ export default class FlightDeck extends View {
         .child(mono(10, C.fg2, 600).child("RESET VIEW"))));
   }
 
-  canopy(vp) {
-    const { w, h } = vp;
-    const k = this.canopyCache;
-    if (!k || k.w !== w || k.h !== h) {
-      const side = Math.max(18, Math.min(44, w * 0.045));
-      const shapes = [
-        [[0, 0], [w, 0], [w, 10], [w * 0.64, 22], [w * 0.36, 22], [0, 10]],
-        [[0, 0], [side, 0], [side * 0.35, h], [0, h]],
-        [[w, 0], [w - side, 0], [w - side * 0.35, h], [w, h]],
-        [[0, h], [0, h - 8], [w * 0.3, h - 18], [w * 0.7, h - 18], [w, h - 8], [w, h]],
-      ];
-      let fill = PathBuilder.fill();
-      let edge = PathBuilder.stroke(1);
-      for (const s of shapes) { fill = fill.add_polygon(s, true); edge = edge.add_polygon(s, true); }
-      this.canopyCache = { w, h, fill: fill.build(), edge: edge.build() };
-    }
-    const at = (el) => el.absolute().left(0).top(0).w(w).h(h);
-    return div().absolute().left(0).top(0).w(w).h(h)
-      .child(at(window.paint_path(this.canopyCache.fill, C.surface)))
-      .child(at(window.paint_path(this.canopyCache.edge, C.gray80)));
-  }
-
   readout(vp, shown, list) {
     const tabs = shown.flatMap((s) => s.tabs ?? []);
     const longest = list.reduce((m, a) => {
       const since = tabs.find((t) => t.id === a.tab)?.working_since;
       return a.status === "working" && since ? Math.max(m, (this.now ?? this.clock()) - since) : m;
     }, 0);
-    const corner = (lines, left) => v_flex().absolute().top(34).gap(2)
-      .when(left, (el) => el.left(Math.max(24, vp.w * 0.05) + 8)).when(!left, (el) => el.right(Math.max(24, vp.w * 0.05) + 8).items_end())
+    const corner = (lines, left) => v_flex().absolute().top(EDGE).gap(2)
+      .when(left, (el) => el.left(EDGE)).when(!left, (el) => el.right(EDGE).items_end())
       .children(lines.map(([t, c]) => mono(10, c, 500).child(t)));
     const worktrees = new Set(list.map((a) => this.worktree(a)?.path).filter(Boolean)).size;
     const system = shown[0];
