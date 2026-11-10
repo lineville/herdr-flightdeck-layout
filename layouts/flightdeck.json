@@ -25,18 +25,7 @@
               "id": "spaces",
               "type": "block",
               "content": {
-                "mod": "spaces"
-              },
-              "size": {
-                "weight": 1
-              },
-              "min": 90
-            },
-            {
-              "id": "agents",
-              "type": "block",
-              "content": {
-                "mod": "agents"
+                "mod": "deck-spaces"
               },
               "size": {
                 "weight": 1
@@ -75,7 +64,7 @@
           "id": "tabs",
           "type": "block",
           "content": {
-            "mod": "tabs"
+            "mod": "deck-tabs"
           },
           "size": {
             "px": 42
@@ -128,7 +117,7 @@
               "size": {
                 "weight": 1
               },
-              "min": 420,
+              "min": 320,
               "border": {
                 "width": 1,
                 "color": "border"

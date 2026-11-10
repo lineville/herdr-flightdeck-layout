@@ -1,19 +1,24 @@
 # Flight Deck layout
 
-Herdr's main layout with Flight Deck docked beside your work: the shown tab on the left, and on the right a cockpit view of the space as a star system, where each agent is a craft that launches when it starts work, orbits while it works, holds when it needs you and lands when it's done. The sidebar, tab bar, Files and Changes panel and status bar are Herdr's own, unchanged.
+Herdr's main layout reorganised around repos, worktrees and agents, with Flight Deck docked beside your work. The sidebar is one tree: each space is a repo, under it each worktree that has terminals open, under each worktree its agents. On the right, Flight Deck shows every space as a planet, with each agent as a craft orbiting in its worktree's color: it launches when it starts work, orbits while it works, holds when it needs you, and lands when it's done.
 
 ![Flight Deck layout](preview.png)
 
 ## What you see
 
-Left to right, as in Herdr's main layout:
+Left to right:
 
-- **Sidebar**, 268px on `chrome`: the brand bar (46px), the spaces list and the agents list sharing the height, and the footer (69px). Herdr's `workspace-chrome`, `spaces` and `agents` mods.
+- **Sidebar**, 268px on `chrome`: Herdr's brand bar (46px, `workspace-chrome`), the tree (`deck-spaces`), and the footer (69px, `workspace-chrome`).
+  - **Header**, 31px: `Spaces` in `dim` 11.5, then `N need(s) you` in `blocked` and `N working` in `working` when there are any, and a folder-plus button that opens a repo as a new space.
+  - **Space rows**, 30px, radius 7: a fold chevron, an 18px rounded avatar in the space's color with its first letter in white, the name in semibold, and a `+` that opens New worktree. Folded, it shows its agent count and most urgent status. The shown space is `selected`.
+  - **Worktree rows**, 26px, indented 18px: a chevron (when it has agents), an 8px dot in the worktree's color, the branch name, and a `+` that starts Pi in that worktree as a new tab. The row whose tab is shown is `hover`.
+  - **Agent rows**, 24px, indented 40px, with a 1px guide line in the worktree's color at 40%: the program icon, the agent's name (Pi's session name from its title, else its own title, else the program; idle and unfocused in `muted`), and its status: a spinning ring (working), a `!` tile (blocked), a filled dot (done) or a hollow dot (idle). Sub-agents follow, indented 12px per level with `└`.
+  - Narrower than 160px, the tree becomes a rail of space avatars with a status dot.
 - **Work column**:
-  - **Tab bar**, 42px, Herdr's `tabs` mod.
+  - **Tab bar**, 42px (`deck-tabs`): tabs as pills, each with its worktree's color dot, program icon and the agent's session name (else the tab's name); tooltip shows the branch. `+` opens `deck-new-menu`; `Flight Deck`, `Files` and `Changes` toggle their panels.
   - **Work body**, a row with 8px padding and 8px gaps:
-    - **The shown tab** (`tab: "active"`), its panes as cards with a 30px `pane` header, radius 10, 1px `border`, `accent` focus ring. Half the width, at least 360px.
-    - **Flight Deck**, the other half, at least 420px, in a block with radius 10 and a 1px `border`: the top bar with system, other spaces and counts; the cockpit with the planet, dotted orbits and craft; the crew manifest, which you can drag taller or shorter or collapse to its header. See `mods/flightdeck` and the mod's recipe for every detail.
+    - **The shown tab** (`tab: "active"`), its panes as cards with a 30px `pane` header, radius 10, 1px `border`, `accent` focus ring. At least 360px.
+    - **Flight Deck**, at least 320px, radius 10, 1px `border`: Fleet mode shows every space as a planet on a grid that fits the block (stacked when tall and narrow); System mode shows one. See `mods/flightdeck` and the mod's recipe for every detail.
     - **Files and Changes**, Herdr's panel, hidden until opened from the tab bar, 368px.
   - **Status bar**, 28px, Herdr's `workspace-status` mod.
 
@@ -21,29 +26,41 @@ The window keeps the person's own theme and fonts; Flight Deck draws on its own 
 
 ## How it behaves
 
-- Everything in the sidebar, tab bar, panes and status bar works as in Herdr's main layout.
-- Drag the line between the tab and Flight Deck to give either more room.
-- Flight Deck follows the shown space: switch spaces and its system changes. Click a craft or a manifest row to focus that agent's terminal on the left.
-- Agent status drives each craft (working: orbiting with a spinning cyan arc; blocked: holding with a pulsing ring; done: landed). How full an agent's context is sets how close it orbits; its model sets its glyph and size.
-- Drag the cockpit to turn the system, scroll to zoom. Drag the manifest's header to resize it, or collapse it.
+- **A space is a repo; a worktree is tabs in it.** The tree reads each space's `git worktree list` (when new, when a pane sits outside every known worktree, and every 20 seconds while the window is in front) and groups terminals by the worktree their live folder is in, the deepest match winning. A split or a `cd` moves a terminal to the right branch. Only worktrees with terminals open show.
+- **Worktree colors** stick: each open worktree gets the least used of `#8cabff`, `#58d6b5`, `#f257a5`, `#b061ff`, `#d9c27a`, `#c0c4ff`, `#e08cff`, `#7fa7c9` (kept clear of status green, orange and amber and of the deck's cyan), saved in `shared("worktree.colors")`. Colors of worktrees git no longer lists are dropped.
+- **Clicks**: a space row shows that space; a worktree row shows its first tab; an agent row focuses its pane; a sub-agent focuses or peeks it. Chevrons fold (saved per copy). `agent.next` / `agent.prev` follow the tree's order.
+- **Right-click** a space: New worktree, Open worktree, Rename space, Close space. Right-click a worktree: New Pi agent, New Claude agent, New terminal, Close its tabs (when some tabs are wholly in it), Remove worktree (linked worktrees only).
+- **New worktree** (`deck-worktree`) checks out the branch (new from the current HEAD, or existing) in `~/.herdr/worktrees/<repo>/<branch>` and opens it as a tab named after the branch in the repo's space, running Pi. **Open worktree** lists the repo's checkouts, shows `open` for those with a tab, and selects that tab or opens a new one. **Remove worktree** closes the tabs wholly in it and the panes in it of mixed tabs (opening a tab at the main checkout first if nothing would be left), then runs `git worktree remove`; the space stays.
+- Flight Deck: clicking a planet shows that space, double-clicking opens it in System mode, clicking a craft or manifest row focuses that agent on the left. Drag to turn, scroll to zoom.
+- Pi sessions show their names everywhere once named (`/name`, or an extension that names them after the first prompt): Pi sets its title to `π - <name> - <folder>`, and the tree, tab bar and Flight Deck read it.
 
 ## Built from
 
-- `layouts/flightdeck.json`: Herdr's main layout (as shipped in Herdr 0.1.14), with one block added in `work-body` after `main`: `{ "id": "flightdeck", "type": "block", "size": { "weight": 1 }, "min": 420, "radius": 10, "border": { "width": 1, "color": "border" }, "content": { "mod": "flightdeck" } }`, and `main` given `"size": { "weight": 1 }, "min": 360`. Root `"preview": "layouts/flightdeck.svg"`.
+- `layouts/flightdeck.json`: Herdr's main layout (as shipped in Herdr 0.1.14) with the `spaces` and `agents` blocks replaced by one `spaces` block showing `deck-spaces` (weight 1, min 90), the `tabs` block showing `deck-tabs`, and one block added in `work-body` after `main`: `{ "id": "flightdeck", "type": "block", "size": { "weight": 1 }, "min": 320, "radius": 10, "border": { "width": 1, "color": "border" }, "content": { "mod": "flightdeck" } }`; `main` has `"size": { "weight": 1 }, "min": 360`. Root `"preview": "layouts/flightdeck.svg"`.
 - `layouts/flightdeck.svg`: the settings screen's picture of the layout.
+- `mods/deck-spaces/`: the tree. Herdr functions `spaces`, `panes`, `agents`, `terminals`, `setAgentOrder`, `run`, `openOverlay`, `exec`, `theme`, `shared`, `setShared`, `layout`, `window`, `pickFolder`. Runs `git worktree list --porcelain` in each space. Publishes `shared("deck.tree")` (each pane's worktree, each worktree's branch, color and space) for the tab bar and Flight Deck, and keeps `space.colors` and `worktree.colors`.
+- `mods/deck-tabs/`: a clone of Herdr's `tabs` (0.1.14) with worktree dots, session names and the Flight Deck toggle.
+- `mods/deck-menu/`: the tree's right-click menu, `{ kind: "space" | "worktree", space, path, branch, main, git }`.
+- `mods/deck-worktree/`: a clone of Herdr's `worktree` (0.1.15) that makes, opens and removes worktrees as tabs in the repo's space. Runs `git`.
+- `mods/deck-new-menu/`: a clone of Herdr's `new-menu` (0.1.15) whose worktree items open `deck-worktree`.
 - `mods/flightdeck/`: the Flight Deck mod. Its own recipe is at github.com/lineville/herdr-flightdeck.
-- Shipped Herdr mods it uses: `workspace-chrome`, `spaces`, `agents`, `tabs`, `pane`, `files`, `changes`, `workspace-status`.
+- Shipped Herdr mods it uses: `workspace-chrome` (and its icons), `pane`, `files`, `changes`, `workspace-status`.
 
 ## Watch out
 
-- The layout copies Herdr's main layout at one release. If Herdr's main changes, rebuild from the new one: clone it (`layout.clone {name: "main", as: "flightdeck"}`) and add the `flightdeck` block beside `main` again.
+- The layout copies Herdr's main layout at one release. If Herdr's main changes, rebuild from the new one: clone it (`layout.clone {name: "main", as: "flightdeck"}`), swap in `deck-spaces` and `deck-tabs`, and add the `flightdeck` block beside `main` again.
 - A new mod docks itself into the layout that shows when Herdr first sees it. If `mods/flightdeck` was installed before this layout, check `work-body` for a second Flight Deck block and remove it.
+- Herdr's own menus (`new-menu`, `menu`, used by other layouts) still make worktrees as separate spaces. In this layout those show as their own space rows.
+- `setShared` re-renders every mod: `deck-spaces` writes only when the JSON changed.
+- Pane folders come from the shell's reports; a program that never reports its folder groups under where it started.
 - Flight Deck reads each agent's status line with `hc read` every 5 seconds for its model and context; see the mod's recipe.
 
 ## Done when
 
-- `herdr-app check ~/.config/herdr-app/mods/flightdeck` passes, and `layouts/flightdeck.error` doesn't exist.
-- `layout.switch {name: "flightdeck"}` shows Herdr's sidebar, tab bar and status bar, the shown tab on the left and Flight Deck on the right, splitting the width.
+- `herdr-app check` passes for `flightdeck`, `deck-spaces`, `deck-tabs`, `deck-menu`, `deck-worktree` and `deck-new-menu`, and `layouts/flightdeck.error` doesn't exist.
+- `layout.switch {name: "flightdeck"}` shows the tree, the tab bar with worktree dots, the shown tab on the left and Flight Deck on the right.
+- A space on a repo shows a `main` worktree row with its agents under it; New worktree from the space's `+` adds a colored worktree row with Pi running under it, as a tab in the same space.
+- The worktree's dot, its tabs' dots and its agents' orbits in Flight Deck share one color.
+- With two spaces open, Flight Deck shows two planets, and clicking one switches space.
+- Remove worktree closes its tabs, keeps the space, and deletes the checkout.
 - `ctrl-shift-l` cycles back to the person's own layout, unchanged.
-- An agent working in the shown tab orbits in Flight Deck, and clicking its craft focuses it on the left.
-- Dragging the line between them resizes both.
