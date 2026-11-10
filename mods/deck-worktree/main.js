@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, shared, setShared } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -245,7 +245,12 @@ export default class Worktree extends View {
     }
     const force = this.dirty || mods.length > 0;
     const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
-    return r.ok ? "" : r.err || "git worktree remove failed.";
+    if (!r.ok) return r.err || "git worktree remove failed.";
+    // Drop it from the tree's kept worktrees now, not at its next git refresh.
+    const kept = shared("deck.kept") ?? {};
+    const next = Object.fromEntries(Object.entries(kept).map(([id, list]) => [id, list.filter((k) => k.path !== this.repo.top)]).filter(([, list]) => list.length));
+    if (JSON.stringify(next) !== JSON.stringify(kept)) setShared("deck.kept", next);
+    return "";
   }
 
   key(e, cx) {

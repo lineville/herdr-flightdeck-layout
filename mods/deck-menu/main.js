@@ -1,14 +1,21 @@
 // Right-click menu for the tree sidebar. props:
 //   { kind: "space", space }
-//   { kind: "worktree", space, path, branch, main, git, pr: { number, url }?, ticket: { id, url }? }
+//   { kind: "worktree", space, path, branch, main, git, empty, pr: { number, url }?, ticket: { id, url }? }
 // Icons are names in mods/workspace-chrome, or a path to an svg.
 // ↑/↓ move, Enter runs, Esc closes.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, spaces, panes, exec } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, spaces, panes, exec, shared, setShared } from "herdr";
 
 const open = (url) => () => exec("open", [url]).catch(() => {});
+// Drops a worktree from the tree's kept list (see deck-spaces).
+const hide = (space, path) => () => {
+  const kept = { ...(shared("deck.kept") ?? {}) };
+  kept[space] = (kept[space] ?? []).filter((k) => k.path !== path);
+  if (!kept[space].length) delete kept[space];
+  setShared("deck.kept", kept);
+};
 const dialog = (p, big) => openOverlay({ mod: "deck-worktree", kind: "dialog", width: big ? 560 : 460, height: big ? 480 : 280, props: p });
 
 function items(p) {
@@ -34,6 +41,7 @@ function items(p) {
     ["New Claude agent", "plus", tab(["claude"])],
     ["New terminal", "terminal", tab(undefined)],
     ...(mine.length ? [["Close its tabs", "x", () => mine.forEach((t) => run("tab.close", { id: t.id, confirmed: true }))]] : []),
+    ...(p.empty ? [["Hide from sidebar", "x", hide(p.space, p.path)]] : []),
     ...(p.git && !p.main ? [["Remove worktree…", "archive", () => dialog({ space: p.space, folder: p.path, action: "remove" })]] : []),
   ];
 }

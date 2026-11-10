@@ -1,6 +1,8 @@
 // Flight Deck sidebar: one tree. A space is a repo; under it, each worktree that has
-// terminals open in that space; under each worktree, its agents. Worktrees are found
-// from the panes' live folders, so a split or a `cd` lands in the right branch.
+// had terminals open in that space; under each worktree, its agents. Worktrees are found
+// from the panes' live folders, so a split or a `cd` lands in the right branch. A
+// worktree stays (shared "deck.kept") after its terminals close, until git stops
+// listing it or it is hidden from its menu.
 // It also gives every worktree a color and publishes the tree (shared "deck.tree")
 // for the tab bar and the Flight Deck.
 
@@ -250,10 +252,11 @@ export default class Spaces extends View {
       .child(svg(`mods/deck-spaces/pr/${icon}.svg`).size(12));
   }
 
-  // A space's worktrees that have terminals open, main checkout first, each with
-  // its tabs, panes and agents.
-  groups(s, ps, list) {
-    const known = this.wt[s.id]?.list ?? [];
+  // A space's worktrees that have terminals open or are kept, main checkout first,
+  // then in the order they were first seen, each with its tabs, panes and agents.
+  groups(s, ps, list, kept) {
+    const listed = this.wt[s.id]?.list;
+    const known = listed ?? [];
     const tabs = new Set(s.tabs.map((t) => t.id));
     const by = new Map();
     for (const p of ps) {
@@ -269,7 +272,32 @@ export default class Spaces extends View {
     const paneOf = new Map();
     for (const g of by.values()) for (const p of g.panes) paneOf.set(p, g);
     for (const a of list) paneOf.get(a.pane)?.agents.push(a);
-    return [...by.values()].sort((a, b) => b.main - a.main || a.order - b.order);
+    for (const k of kept) {
+      if (by.has(k.path)) continue;
+      const wt = known.find((w) => w.path === k.path);
+      if (listed && !wt) continue; // git dropped it; keep() forgets it
+      by.set(k.path, { path: k.path, branch: wt ? wt.branch ?? "detached" : k.branch, main: wt ? wt.main : k.main, git: true, tabs: [], panes: [], agents: [], order: by.size });
+    }
+    const rank = (g) => { const i = kept.findIndex((k) => k.path === g.path); return i < 0 ? Infinity : i; };
+    return [...by.values()].sort((a, b) => b.main - a.main || rank(a) - rank(b) || a.order - b.order);
+  }
+
+  // Remembers every git worktree with terminals open, so it stays when they close.
+  // Forgets those git no longer lists and those of closed spaces.
+  keep(trees, old) {
+    const next = {};
+    for (const { s, groups } of trees) {
+      const listed = this.wt[s.id]?.list;
+      const list = (old[s.id] ?? []).filter((k) => !listed || listed.some((w) => w.path === k.path));
+      for (const g of groups) {
+        const at = list.findIndex((k) => k.path === g.path);
+        if (at >= 0) list[at] = { path: g.path, branch: g.branch, main: g.main };
+        else if (g.git && g.panes.length) list.push({ path: g.path, branch: g.branch, main: g.main });
+      }
+      if (list.length) next[s.id] = list;
+    }
+    if (!trees.length) return;
+    if (JSON.stringify(next) !== JSON.stringify(old)) setShared("deck.kept", next);
   }
 
   // Gives every open worktree a color that sticks, the least used first. Colors of
@@ -388,8 +416,9 @@ export default class Spaces extends View {
       const ps = this.ps.filter((x) => x.tab === tab.id && x.terminal);
       return ps.length && ps.every((x) => x.cwd && inside(x.cwd, g.path));
     });
-    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (g.git && !g.main ? 1 : 0);
-    this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, pr, ticket }, 36 + count * 30);
+    const empty = g.panes.length === 0;
+    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0);
+    this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, empty, pr, ticket }, 36 + count * 30);
   }
 
   spaceRow(s, groups, fill, t) {
@@ -415,13 +444,19 @@ export default class Spaces extends View {
     const shown = s.active && s.tabs.find((x) => x.active && g.tabs.includes(x.id));
     const worst = top(g.agents.map((a) => a.status));
     const badge = this.prBadge(s, g, t);
+    const empty = g.tabs.length === 0;
     return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18).pr(6).gap(6).items_center().rounded(7)
       .when(Boolean(shown), (el) => el.bg(t.hover)).hover((st) => st.bg(t.hover))
-      .on_click(() => { run("space.select", { id: s.id }); run("tab.select", { id: g.tabs[0] }); })
+      .when(empty, (el) => el.tooltip("No terminals open. Click for a terminal here."))
+      .on_click(() => {
+        run("space.select", { id: s.id });
+        if (empty) run("tab.new", { space: s.id, folder: g.path, name: g.branch });
+        else run("tab.select", { id: g.tabs[0] });
+      })
       .on_mouse_down("right", () => this.worktreeMenu(s, g))
       .child(g.agents.length ? this.chevron(key, t) : div().w(16).flex_none())
       .child(div().size(8).flex_none().rounded(4).bg(color))
-      .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(g.branch))
+      .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(empty ? t.muted : t.foreground).child(g.branch))
       .when(folded && g.agents.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(g.agents.length))))
       .when(folded && worst && worst !== "idle", (el) => el.child(this.status(t, worst)))
       .when(Boolean(badge), (el) => el.child(badge))
@@ -474,7 +509,9 @@ export default class Spaces extends View {
     // A sub-agent with its own pane shows under its parent, not as its own row.
     const nested = new Set(list.flatMap((a) => this.kids(a.address).map((x) => x.k.address)));
     const tops = list.filter((a) => !nested.has(a.address));
-    const trees = sp.map((s) => ({ s, groups: this.groups(s, this.ps, tops.filter((a) => a.space === s.id)) }));
+    const kept = shared("deck.kept") ?? {};
+    const trees = sp.map((s) => ({ s, groups: this.groups(s, this.ps, tops.filter((a) => a.space === s.id), kept[s.id] ?? []) }));
+    this.keep(trees, kept);
     this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
     const colors = this.colors(trees);
     const spaceColors = this.spaceColors(sp);
