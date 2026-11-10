@@ -15,7 +15,53 @@ const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b
 const SPACE_PALETTE = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const REFRESH_MS = 20000;
+const PR_REFRESH_MS = 60000;
 const RAIL = 160;
+
+// Pull request badges on worktree rows. `color` is a theme color name.
+const PR = {
+  failing: { color: "ansi1", label: "CI failing" },
+  conflict: { color: "ansi1", label: "Merge conflict" },
+  draft: { color: "dim", label: "Draft" },
+  changes: { color: "ansi3", label: "Changes requested" },
+  running: { color: "ansi3", label: "CI running" },
+  approved: { color: "ansi2", label: "Approved" },
+  review: { color: "ansi4", label: "Waiting on review" },
+  merged: { color: "ansi5", label: "Merged" },
+  closed: { color: "dim", label: "Closed" },
+};
+const PR_FIELDS = "number,url,state,isDraft,reviewDecision,mergeable,statusCheckRollup";
+const CHECK_FAIL = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
+const CHECK_STUCK_MS = 90 * 60000; // pending this long (codecov, say) never finishes
+const GH = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+
+// A PR from `gh pr view --json` as one state and a tooltip. Failing CI wins, then draft.
+export function prState(pr, now = Date.now()) {
+  if (!pr) return null;
+  if (pr.state === "MERGED") return { state: "merged", tip: `#${pr.number} merged` };
+  if (pr.state === "CLOSED") return { state: "closed", tip: `#${pr.number} closed` };
+  const checks = pr.statusCheckRollup ?? [];
+  const failed = checks.filter((c) => CHECK_FAIL.has(c.conclusion || c.state));
+  const pending = checks.filter((c) => {
+    const waiting = c.__typename === "StatusContext" ? c.state === "PENDING" || c.state === "EXPECTED" : c.status && c.status !== "COMPLETED";
+    const started = Date.parse(c.startedAt ?? "");
+    return waiting && !(started && now - started > CHECK_STUCK_MS);
+  });
+  const state = failed.length ? "failing"
+    : pr.isDraft ? "draft"
+    : pr.mergeable === "CONFLICTING" ? "conflict"
+    : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes"
+    : pending.length ? "running"
+    : pr.reviewDecision === "APPROVED" ? "approved"
+    : "review";
+  const parts = [`#${pr.number}`];
+  if (pr.isDraft) parts.push("draft");
+  if (failed.length) parts.push(`${failed.length} check${failed.length === 1 ? "" : "s"} failing`);
+  else if (pending.length) parts.push(`${pending.length} check${pending.length === 1 ? "" : "s"} running`);
+  if (pr.mergeable === "CONFLICTING") parts.push("merge conflict");
+  if (!pr.isDraft) parts.push(pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes requested" : "waiting on review");
+  return { state, tip: parts.join(" · ") };
+}
 
 const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
 const base = (p) => (p ?? "").replace(/\/+$/, "").split("/").pop();
@@ -65,6 +111,9 @@ export default class Spaces extends View {
   init(_props, cx) {
     this.wt = {}; // space id -> { key, list, at }
     this.busy = false;
+    this.prs = {}; // worktree path -> { branch, at, pr }
+    this.prBusy = false;
+    this.open = []; // [{ s, g }] worktrees shown, set on render
     this.folded = new Set(JSON.parse(localStorage.getItem("tree.folded") ?? "[]"));
     cx.timer.every(1000, (cx) => this.refresh(cx));
     this.refresh(cx);
@@ -83,6 +132,7 @@ export default class Spaces extends View {
   // Reads each space's worktrees when it is new, when a pane sits outside every
   // known worktree (one was just made), or every REFRESH_MS while the window is in front.
   refresh(cx) {
+    this.refreshPrs(cx);
     if (this.busy) return;
     const now = Date.now();
     const ps = panes();
@@ -111,6 +161,60 @@ export default class Spaces extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  // Runs gh, finding it once: the app may not have Homebrew on its PATH.
+  async gh(args, cwd, on) {
+    if (on) return exec("gh", args, { cwd, on, timeout: 20000 });
+    for (const bin of this.ghBin ? [this.ghBin] : GH) {
+      try {
+        const r = await exec(bin, args, { cwd, timeout: 20000 });
+        if (r.code === 127) continue;
+        this.ghBin = bin;
+        return r;
+      } catch {}
+    }
+    return null;
+  }
+
+  // Reads each shown branch worktree's PR when its branch changes, or every
+  // PR_REFRESH_MS while the window is in front. No PR is remembered as null.
+  refreshPrs(cx) {
+    if (this.prBusy) return;
+    const now = Date.now();
+    const active = window()?.active;
+    const due = this.open.filter(({ g }) => {
+      if (!g.git || ["detached", "main", "master"].includes(g.branch)) return false;
+      const known = this.prs[g.path];
+      return !known || known.branch !== g.branch || active && now - known.at > PR_REFRESH_MS;
+    });
+    if (!due.length) return;
+    this.prBusy = true;
+    cx.spawn(async (cx) => {
+      for (const { s, g } of due) {
+        let pr = null;
+        try {
+          const r = await this.gh(["pr", "view", g.branch, "--json", PR_FIELDS], g.path, s.machine);
+          if (r?.code === 0) pr = JSON.parse(r.stdout);
+        } catch {}
+        this.prs[g.path] = { branch: g.branch, at: Date.now(), pr };
+      }
+      this.prBusy = false;
+      cx.notify();
+    });
+  }
+
+  prBadge(s, g, t) {
+    const known = this.prs[g.path];
+    if (!known?.pr || known.branch !== g.branch) return null;
+    const info = prState(known.pr);
+    const look = PR[info.state];
+    const icon = info.state === "draft" || info.state === "merged" || info.state === "closed" ? info.state
+      : info.state === "review" ? "open" : info.state;
+    return div().id(`pr-${s.id}-${g.path}`).size(18).flex_none().flex().items_center().justify_center().rounded(4)
+      .text_color(t[look.color] ?? t.dim).hover((st) => st.bg(t.hover)).tooltip(`${look.label}: ${info.tip}`)
+      .on_click((_e, cx) => { cx.stop_propagation(); exec("open", [known.pr.url]).catch(() => {}); })
+      .child(svg(`mods/deck-spaces/pr/${icon}.svg`).size(12));
   }
 
   // A space's worktrees that have terminals open, main checkout first, each with
@@ -172,7 +276,8 @@ export default class Spaces extends View {
     for (const { s, groups } of trees) {
       tree.spaces[s.id] = groups.map((g) => g.path);
       for (const g of groups) {
-        tree.worktrees[g.path] = { branch: g.branch, main: g.main, color: colors[g.path] ?? HUES[0], space: s.id };
+        const pr = this.prs[g.path]?.branch === g.branch ? this.prs[g.path].pr : null;
+        tree.worktrees[g.path] = { branch: g.branch, main: g.main, color: colors[g.path] ?? HUES[0], space: s.id, pr: pr ? { number: pr.number, url: pr.url, state: prState(pr).state } : null };
         for (const p of g.panes) tree.panes[p] = g.path;
       }
     }
@@ -233,6 +338,7 @@ export default class Spaces extends View {
     const folded = this.folded.has(key);
     const shown = s.active && s.tabs.find((x) => x.active && g.tabs.includes(x.id));
     const worst = top(g.agents.map((a) => a.status));
+    const badge = this.prBadge(s, g, t);
     return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18).pr(6).gap(6).items_center().rounded(7)
       .when(Boolean(shown), (el) => el.bg(t.hover)).hover((st) => st.bg(t.hover))
       .on_click(() => { run("space.select", { id: s.id }); run("tab.select", { id: g.tabs[0] }); })
@@ -242,6 +348,7 @@ export default class Spaces extends View {
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(g.branch))
       .when(folded && g.agents.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(g.agents.length))))
       .when(folded && worst && worst !== "idle", (el) => el.child(this.status(t, worst)))
+      .when(Boolean(badge), (el) => el.child(badge))
       .child(this.plus(`ag-new-${s.id}-${g.path}`, "New Pi agent here", t, () => run("tab.new", { space: s.id, folder: g.path, name: g.branch, argv: ["pi"] })));
   }
 
@@ -292,6 +399,7 @@ export default class Spaces extends View {
     const nested = new Set(list.flatMap((a) => this.kids(a.address).map((x) => x.k.address)));
     const tops = list.filter((a) => !nested.has(a.address));
     const trees = sp.map((s) => ({ s, groups: this.groups(s, this.ps, tops.filter((a) => a.space === s.id)) }));
+    this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
     const colors = this.colors(trees);
     const spaceColors = this.spaceColors(sp);
     this.publish(trees, colors);
