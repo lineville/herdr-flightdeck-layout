@@ -8,7 +8,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder } from "herdr";
+import { spaces, panes, agents, terminals, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome } from "herdr";
 
 // Worktree colors. Kept clear of status colors (green, orange, amber) and the deck's cyan.
 export const HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c4ff", "#e08cff", "#7fa7c9"];
@@ -19,6 +19,16 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const REFRESH_MS = 20000;
 const PR_REFRESH_MS = 60000;
 const RAIL = 160;
+// Space avatars: the GitHub owner's picture for the space's `origin`, cached under the
+// app folder (where image() looks) and fetched again after a week.
+const AVATAR_DIR = "cache/repo-avatars";
+const AVATAR_RETRY_MS = 10 * 60 * 1000; // a space with no avatar asks again after this
+
+// The GitHub owner in a remote URL ("git@github.com:o/r.git", "https://github.com/o/r"), or null.
+export function githubOwner(url) {
+  const m = /github\.com[:/]([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/[^/\s]+\s*$/.exec(url ?? "");
+  return m ? m[1] : null;
+}
 
 // Pull request badges on worktree rows. `color` is a theme color name.
 const PR = {
@@ -148,6 +158,9 @@ export default class Spaces extends View {
     this.tickets = {}; // worktree path -> { number, ticket: { id, url } | null }
     this.teams = JSON.parse(localStorage.getItem("linear.teams") ?? "{}"); // "ENG" -> Linear workspace
     this.open = []; // [{ s, g }] worktrees shown, set on render
+    this.avatars = {}; // space id -> { folder, path, at }; path is relative to the app folder, or null
+    this.owners = {}; // GitHub owner -> Promise of its cached avatar path, or null
+    this.avatarBusy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("tree.folded") ?? "[]"));
     cx.timer.every(1000, (cx) => this.refresh(cx));
     this.refresh(cx);
@@ -167,6 +180,7 @@ export default class Spaces extends View {
   // known worktree (one was just made), or every REFRESH_MS while the window is in front.
   refresh(cx) {
     this.refreshPrs(cx);
+    this.refreshAvatars(cx);
     if (this.busy) return;
     const now = Date.now();
     const ps = panes();
@@ -195,6 +209,58 @@ export default class Spaces extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  // Looks up each space's avatar when it is new, when its folder changes, or, if it had
+  // none, every AVATAR_RETRY_MS.
+  refreshAvatars(cx) {
+    if (this.avatarBusy) return;
+    const now = Date.now();
+    const due = spaces().filter((s) => {
+      const known = this.avatars[s.id];
+      return s.folder && (!known || known.folder !== s.folder || !known.path && now - known.at > AVATAR_RETRY_MS);
+    });
+    if (!due.length) return;
+    this.avatarBusy = true;
+    cx.spawn(async (cx) => {
+      for (const s of due) {
+        let path = null;
+        try {
+          const r = await exec("git", ["remote", "get-url", "origin"], { cwd: s.folder, on: s.machine });
+          const owner = r.code === 0 ? githubOwner(r.stdout) : null;
+          if (owner) path = await this.avatarFile(owner);
+        } catch {}
+        this.avatars[s.id] = { folder: s.folder, path, at: Date.now() };
+      }
+      this.avatarBusy = false;
+      cx.notify();
+    });
+  }
+
+  // The owner's avatar as a path image() takes, downloading it if it is missing or a week old.
+  avatarFile(owner) {
+    const name = owner.toLowerCase();
+    this.owners[name] ??= (async () => {
+      const rel = `${AVATAR_DIR}/${name}.png`;
+      const abs = `${appHome()}/${rel}`;
+      const fresh = await exec("find", [abs, "-mtime", "-7"]).catch(() => null);
+      if (fresh?.code === 0 && fresh.stdout.trim()) return rel;
+      await exec("mkdir", ["-p", `${appHome()}/${AVATAR_DIR}`]);
+      const got = await exec("curl", ["-fsSL", "--max-time", "15", "-o", `${abs}.part`, `https://github.com/${name}.png?size=96`]).catch(() => null);
+      if (got?.code === 0 && (await exec("mv", ["-f", `${abs}.part`, abs])).code === 0) return rel;
+      const old = await exec("test", ["-s", abs]).catch(() => null);
+      return old?.code === 0 ? rel : null;
+    })();
+    const p = this.owners[name];
+    p.then((rel) => { if (!rel && this.owners[name] === p) delete this.owners[name]; });
+    return p;
+  }
+
+  // A space's mark: its GitHub owner's avatar, else its initial on its color.
+  mark(s, fill, size, text) {
+    const pic = this.avatars[s.id]?.path;
+    if (pic) return image(pic).size(size).flex_none().rounded(5);
+    return h_flex().size(size).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(text).font_bold().text_color("#ffffff").child([...s.name][0]?.toUpperCase() ?? "?");
   }
 
   // Runs gh, finding it once: the app may not have Homebrew on its PATH.
@@ -431,7 +497,7 @@ export default class Spaces extends View {
       .on_click(() => run("space.select", { id: s.id }))
       .on_mouse_down("right", () => this.menu({ kind: "space", space: s.id }))
       .child(this.chevron(key, t))
-      .child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...s.name][0]?.toUpperCase() ?? "?"))
+      .child(this.mark(s, fill, 18, 10.5))
       .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(s.name))
       .when(folded && all.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(all.length))))
       .when(folded && worst && worst !== "idle", (el) => el.child(this.status(t, worst)))
@@ -494,7 +560,7 @@ export default class Spaces extends View {
       return h_flex().flex_none().justify_center().child(h_flex().id(`rail-${s.id}`).relative().size(32).rounded(7).items_center().justify_center()
         .when(s.active, (el) => el.bg(t.selected)).when(!s.active, (el) => el.hover((st) => st.bg(t.hover)))
         .tooltip(s.name).on_click(() => run("space.select", { id: s.id }))
-        .child(h_flex().size(20).rounded(5).bg(MARK[c] ?? t[c] ?? c).items_center().justify_center().text_size(11).font_bold().text_color("#ffffff").child([...s.name][0]?.toUpperCase() ?? "?"))
+        .child(this.mark(s, MARK[c] ?? t[c] ?? c, 20, 11))
         .when(worst === "blocked" || worst === "done", (el) => el.child(div().absolute().right(3).top(3).size(7).rounded(4).bg(t[worst]))));
     });
   }
