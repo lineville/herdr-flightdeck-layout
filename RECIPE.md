@@ -1,6 +1,6 @@
 # Flight Deck layout
 
-Herdr's main layout reorganised around repos, worktrees and agents, with Flight Deck docked beside your work. The sidebar is one tree: each space is a repo, under it each worktree you've opened (it stays after its terminals close), under each worktree its agents. On the right, Flight Deck shows every space as a planet, with each agent as a craft on a muted gray orbit, its branch label in its worktree's color: it launches when it starts work, orbits while it works, holds when it needs you, and lands when it's done.
+Herdr's main layout reorganised around repos, worktrees and agents, with Flight Deck docked beside your work. The sidebar is one tree: each space is a repo, under it each worktree you've opened (it stays after its terminals close), under each worktree its agents. On the right, Flight Deck shows every space as a planet, with each agent as a craft on a muted gray orbit while it's in flight, its branch label in its worktree's color: it launches when it starts work, orbits while it works, holds when it needs you, and lands when it's done.
 
 ![Flight Deck layout](preview.png)
 

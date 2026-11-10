@@ -61,6 +61,8 @@ const ORBIT_GRAY = C.fg2; // orbits stay neutral so they don't compete with the 
 const ORBIT_NEAR_ALPHA = "8c"; // 55%
 const ORBIT_FAR_ALPHA = "4d"; // 30%
 const ORBIT_DOTS = [1.5, 5];
+// Only craft in flight draw their orbit; descending, landed and docked craft don't.
+const IN_FLIGHT = new Set(["launch", "orbit", "hold"]);
 
 const HUD_H = 40;
 const EDGE = 16; // inset of the cockpit readouts, matching the top bar's padding
@@ -534,7 +536,7 @@ export default class FlightDeck extends View {
 
   cockpit(vp, shown, list, tabs) {
     const { yaw, pitch, zoom } = this.look;
-    const tops = [...this.craft.values()].filter((c) => this.cams.has(c.space) && !c.parent);
+    const tops = [...this.craft.values()].filter((c) => this.cams.has(c.space) && !c.parent && IN_FLIGHT.has(c.phase));
     const key = `${vp.w}x${vp.h}:${yaw}:${pitch}:${zoom}:${this.cells.map((c) => `${c.space.id}@${c.x},${c.y},${c.w},${c.h}`).join("|")}:${tops.map((c) => `${c.space}/${c.slot}@${c.r.toFixed(2)}`).sort().join(",")}`;
     if (!this.orbitCache || this.orbitCache.key !== key) {
       const build = (runs) => runs.filter((r) => r.length > 1).map((r) => {
