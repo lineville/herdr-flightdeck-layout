@@ -26,7 +26,7 @@ const PR = {
   changes: { color: "ansi3", label: "Changes requested" },
   running: { color: "ansi3", label: "CI running" },
   approved: { color: "ansi2", label: "Approved" },
-  review: { color: "ansi4", label: "Waiting on review" },
+  review: { color: "ansi2", label: "Waiting on review" },
   merged: { color: "ansi5", label: "Merged" },
   closed: { color: "dim", label: "Closed" },
 };
