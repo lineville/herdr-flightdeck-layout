@@ -1,12 +1,14 @@
 // Right-click menu for the tree sidebar. props:
 //   { kind: "space", space }
-//   { kind: "worktree", space, path, branch, main, git }
+//   { kind: "worktree", space, path, branch, main, git, pr: { number, url }?, ticket: { id, url }? }
+// Icons are names in mods/workspace-chrome, or a path to an svg.
 // ↑/↓ move, Enter runs, Esc closes.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, spaces, panes } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, spaces, panes, exec } from "herdr";
 
+const open = (url) => () => exec("open", [url]).catch(() => {});
 const dialog = (p, big) => openOverlay({ mod: "deck-worktree", kind: "dialog", width: big ? 560 : 460, height: big ? 480 : 280, props: p });
 
 function items(p) {
@@ -26,6 +28,8 @@ function items(p) {
     return ps.length && ps.every((x) => x.cwd && (x.cwd === p.path || x.cwd.startsWith(p.path + "/")));
   });
   return [
+    ...(p.pr?.url ? [[`Open PR #${p.pr.number}`, "mods/deck-spaces/pr/open.svg", open(p.pr.url)]] : []),
+    ...(p.ticket?.url ? [[`Open ${p.ticket.id} in Linear`, "mods/deck-menu/ticket.svg", open(p.ticket.url)]] : []),
     ["New Pi agent", "plus", tab(["pi"])],
     ["New Claude agent", "plus", tab(["claude"])],
     ["New terminal", "terminal", tab(undefined)],
@@ -65,7 +69,7 @@ export default class DeckMenu extends View {
       .children(list.map((it, i) => h_flex().id(`mi-${i}`).h(30).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
         .when(i === this.at, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
         .on_click(() => this.choose(i))
-        .child(svg(`mods/workspace-chrome/${it[1]}.svg`).size(14).flex_none().text_color(t.muted))
+        .child(svg(it[1].includes("/") ? it[1] : `mods/workspace-chrome/${it[1]}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().child(it[0]))));
   }
 }

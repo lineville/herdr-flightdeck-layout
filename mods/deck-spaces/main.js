@@ -30,7 +30,37 @@ const PR = {
   merged: { color: "ansi5", label: "Merged" },
   closed: { color: "dim", label: "Closed" },
 };
-const PR_FIELDS = "number,url,state,isDraft,reviewDecision,mergeable,statusCheckRollup";
+const PR_FIELDS = "number,url,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup";
+const LINEAR_LINK = /https:\/\/linear\.app\/([\w-]+)\/issue\/([A-Za-z][A-Za-z0-9]{0,9}-\d+)/g;
+
+// A Linear ticket ID in a branch ("eng-123-fix", "cursor/eng-123-fix") or a PR title
+// ("ENG-123: Fix"), upper-cased. Number 0 is a placeholder, not a ticket.
+export function ticketId(text) {
+  const m = /(?:^|[\/\s\[(])([a-z][a-z0-9]{1,9})-(\d+)(?=$|[-\/\s:\])_])/i.exec(text ?? "");
+  return m && Number(m[2]) > 0 ? `${m[1].toUpperCase()}-${m[2]}` : null;
+}
+
+// The Linear issue links in some text, in order, without repeats.
+export function linearLinks(text) {
+  const seen = new Map();
+  for (const m of (text ?? "").matchAll(LINEAR_LINK)) {
+    const id = m[2].toUpperCase();
+    if (!seen.has(id)) seen.set(id, { id, workspace: m[1], url: `https://linear.app/${m[1]}/issue/${id}` });
+  }
+  return [...seen.values()];
+}
+
+// The PR's own ticket among its Linear links: the one the branch or title names,
+// else the only one, else the first in the body.
+export function pickTicket(links, branch, title, body) {
+  const want = [ticketId(branch), ticketId(title)].filter(Boolean);
+  for (const id of want) {
+    const hit = links.find((l) => l.id === id);
+    if (hit) return hit;
+  }
+  if (links.length === 1) return links[0];
+  return linearLinks(body)[0] ?? links[0] ?? null;
+}
 const CHECK_FAIL = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
 const CHECK_STUCK_MS = 90 * 60000; // pending this long (codecov, say) never finishes
 const GH = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
@@ -113,6 +143,8 @@ export default class Spaces extends View {
     this.busy = false;
     this.prs = {}; // worktree path -> { branch, at, pr }
     this.prBusy = false;
+    this.tickets = {}; // worktree path -> { number, ticket: { id, url } | null }
+    this.teams = JSON.parse(localStorage.getItem("linear.teams") ?? "{}"); // "ENG" -> Linear workspace
     this.open = []; // [{ s, g }] worktrees shown, set on render
     this.folded = new Set(JSON.parse(localStorage.getItem("tree.folded") ?? "[]"));
     cx.timer.every(1000, (cx) => this.refresh(cx));
@@ -198,6 +230,7 @@ export default class Spaces extends View {
           if (r?.code === 0) pr = JSON.parse(r.stdout);
         } catch {}
         this.prs[g.path] = { branch: g.branch, at: Date.now(), pr };
+        if (pr && this.tickets[g.path]?.number !== pr.number) await this.readTicket(s, g, pr);
       }
       this.prBusy = false;
       cx.notify();
@@ -312,8 +345,51 @@ export default class Spaces extends View {
       .child(svg("mods/workspace-chrome/plus.svg").size(11));
   }
 
-  menu(props) {
-    openOverlay({ mod: "deck-menu", kind: "popup", width: 210, height: 220, props });
+  // Finds the PR's Linear ticket in its body and comments (the Linear bot links it in a
+  // comment), once per PR, and learns which workspace each team prefix lives in.
+  async readTicket(s, g, pr) {
+    try {
+      const r = await this.gh(["pr", "view", String(pr.number), "--json", "body,comments"], g.path, s.machine);
+      if (r?.code !== 0) return;
+      const { body, comments } = JSON.parse(r.stdout);
+      const links = linearLinks([body, ...(comments ?? []).map((c) => c.body)].join("\n"));
+      let learned = false;
+      for (const l of links) {
+        const team = l.id.split("-")[0];
+        if (this.teams[team] !== l.workspace) { this.teams[team] = l.workspace; learned = true; }
+      }
+      if (learned) localStorage.setItem("linear.teams", JSON.stringify(this.teams));
+      const hit = pickTicket(links, g.branch, pr.title, body);
+      this.tickets[g.path] = { number: pr.number, ticket: hit && { id: hit.id, url: hit.url } };
+    } catch {}
+  }
+
+  // The worktree's PR and Linear ticket, for its right-click menu.
+  links(g) {
+    const known = this.prs[g.path];
+    const pr = known?.branch === g.branch ? known.pr : null;
+    let ticket = pr && this.tickets[g.path]?.number === pr.number ? this.tickets[g.path].ticket : null;
+    if (!ticket) {
+      const id = ticketId(g.branch) ?? ticketId(pr?.title);
+      const workspace = id && this.teams[id.split("-")[0]];
+      if (workspace) ticket = { id, url: `https://linear.app/${workspace}/issue/${id}` };
+    }
+    return { pr: pr && { number: pr.number, url: pr.url }, ticket };
+  }
+
+  menu(props, height = 220) {
+    openOverlay({ mod: "deck-menu", kind: "popup", width: 220, height, props });
+  }
+
+  // Height of the worktree menu: a branch label, then its items (see deck-menu).
+  worktreeMenu(s, g) {
+    const { pr, ticket } = this.links(g);
+    const mine = s.tabs.filter((tab) => {
+      const ps = this.ps.filter((x) => x.tab === tab.id && x.terminal);
+      return ps.length && ps.every((x) => x.cwd && inside(x.cwd, g.path));
+    });
+    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (g.git && !g.main ? 1 : 0);
+    this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, pr, ticket }, 36 + count * 30);
   }
 
   spaceRow(s, groups, fill, t) {
@@ -342,7 +418,7 @@ export default class Spaces extends View {
     return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18).pr(6).gap(6).items_center().rounded(7)
       .when(Boolean(shown), (el) => el.bg(t.hover)).hover((st) => st.bg(t.hover))
       .on_click(() => { run("space.select", { id: s.id }); run("tab.select", { id: g.tabs[0] }); })
-      .on_mouse_down("right", () => this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git }))
+      .on_mouse_down("right", () => this.worktreeMenu(s, g))
       .child(g.agents.length ? this.chevron(key, t) : div().w(16).flex_none())
       .child(div().size(8).flex_none().rounded(4).bg(color))
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(g.branch))
