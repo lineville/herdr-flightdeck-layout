@@ -48,7 +48,7 @@ export function githubOwner(url) {
   return m ? m[1] : null;
 }
 
-// Pull request badges on worktree rows. `color` is a theme color name.
+// Pull request badges on worktree rows. `color` is a theme color name or a hex color.
 const PR = {
   failing: { color: "ansi1", label: "CI failing" },
   conflict: { color: "ansi1", label: "Merge conflict" },
@@ -57,7 +57,7 @@ const PR = {
   running: { color: "ansi3", label: "CI running" },
   approved: { color: "ansi2", label: "Approved" },
   review: { color: "ansi2", label: "Waiting on review" },
-  merged: { color: "ansi5", label: "Merged" },
+  merged: { color: "#ab7df8", label: "Merged" }, // GitHub's merged purple; the theme's ansi5 reads as red
   closed: { color: "dim", label: "Closed" },
 };
 const PR_FIELDS = "number,url,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup";
@@ -333,7 +333,7 @@ export default class Spaces extends View {
     const icon = info.state === "draft" || info.state === "merged" || info.state === "closed" ? info.state
       : info.state === "review" ? "open" : info.state;
     return div().id(`pr-${s.id}-${g.path}`).size(18).flex_none().flex().items_center().justify_center().rounded(4)
-      .text_color(t[look.color] ?? t.dim).hover((st) => st.bg(t.hover)).tooltip(`${look.label}: ${info.tip}`)
+      .text_color(t[look.color] ?? (look.color.startsWith("#") ? look.color : t.dim)).hover((st) => st.bg(t.hover)).tooltip(`${look.label}: ${info.tip}`)
       .on_click((_e, cx) => { cx.stop_propagation(); exec("open", [known.pr.url]).catch(() => {}); })
       .child(svg(`mods/deck-spaces/pr/${icon}.svg`).size(12));
   }
