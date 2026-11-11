@@ -60,7 +60,7 @@ const PR = {
   merged: { color: "#ab7df8", label: "Merged" }, // GitHub's merged purple; the theme's ansi5 reads as red
   closed: { color: "dim", label: "Closed" },
 };
-const PR_FIELDS = "number,url,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup";
+const PR_FIELDS = "number,url,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup,baseRefName";
 const LINEAR_LINK = /https:\/\/linear\.app\/([\w-]+)\/issue\/([A-Za-z][A-Za-z0-9]{0,9}-\d+)/g;
 
 // A Linear ticket ID in a branch ("eng-123-fix", "cursor/eng-123-fix") or a PR title
@@ -121,6 +121,43 @@ export function prState(pr, now = Date.now()) {
   if (pr.mergeable === "CONFLICTING") parts.push("merge conflict");
   parts.push(pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes requested" : "waiting on review");
   return { state, tip: parts.join(" · ") };
+}
+
+// A space's worktrees as runs to draw together: a PR stack (an open PR whose base is another
+// shown worktree's branch) is one run, base first and each PR under the one it targets;
+// every other worktree is a run of one. A run sits where its first worktree was.
+export function stackRuns(groups, prOf) {
+  const byBranch = new Map(groups.filter((g) => g.git && !g.main).map((g) => [g.branch, g]));
+  const parent = new Map();
+  const kids = new Map();
+  for (const g of groups) {
+    const pr = prOf(g);
+    const p = pr?.state === "OPEN" ? byBranch.get(pr.baseRefName) : null;
+    if (!p || p === g) continue;
+    parent.set(g, p);
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(g);
+  }
+  const rootOf = (g) => {
+    const seen = new Set();
+    while (parent.has(g) && !seen.has(g)) { seen.add(g); g = parent.get(g); }
+    return g;
+  };
+  const placed = new Set();
+  const runs = [];
+  for (const g of groups) {
+    if (placed.has(g)) continue;
+    const run = [];
+    const walk = (n) => {
+      if (placed.has(n)) return;
+      placed.add(n);
+      run.push(n);
+      for (const k of kids.get(n) ?? []) walk(k);
+    };
+    walk(rootOf(g));
+    runs.push(run);
+  }
+  return runs;
 }
 
 const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
@@ -524,6 +561,13 @@ export default class Spaces extends View {
       .child(this.plus(`wt-new-${s.id}`, "New worktree", t, () => openOverlay({ mod: "deck-worktree", kind: "dialog", width: 460, height: 280, props: { space: s.id, action: "new" } })));
   }
 
+  // A PR stack's worktrees, framed together by a faint rounded outline.
+  stackBox(s, run, rows, t) {
+    return v_flex().id(`stack-${s.id}-${run[0].path}`).flex_none().gap(1).my(2).py(2).rounded(9).border_1().border_color(t.border)
+      .when(/^#[0-9a-f]{6}$/i.test(t.hover ?? ""), (el) => el.bg(`${t.hover}40`)) // 25%
+      .children(rows);
+  }
+
   worktreeRow(s, g, color, t) {
     const key = `w:${s.id}:${g.path}`;
     const folded = this.folded.has(key);
@@ -596,7 +640,11 @@ export default class Spaces extends View {
     const nested = new Set(list.flatMap((a) => this.kids(a.address).map((x) => x.k.address)));
     const tops = list.filter((a) => !nested.has(a.address));
     const kept = shared("deck.kept") ?? {};
-    const trees = sp.map((s) => ({ s, groups: this.groups(s, this.ps, tops.filter((a) => a.space === s.id), kept[s.id] ?? []) }));
+    const prOf = (g) => (this.prs[g.path]?.branch === g.branch ? this.prs[g.path].pr : null);
+    const trees = sp.map((s) => {
+      const runs = stackRuns(this.groups(s, this.ps, tops.filter((a) => a.space === s.id), kept[s.id] ?? []), prOf);
+      return { s, runs, groups: runs.flat() };
+    });
     this.keep(trees, kept);
     this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
     const colors = this.colors(trees);
@@ -615,14 +663,16 @@ export default class Spaces extends View {
     const newSpace = () => pickFolder({ prompt: "Open a repository as a space" }).then((folder) => folder && run("space.new", { folder }));
     const body = narrow
       ? this.rail(trees, spaceColors, t)
-      : trees.flatMap(({ s, groups }) => {
+      : trees.flatMap(({ s, groups, runs }) => {
         const c = spaceColors[s.id] ?? "ansi6";
         const rows = [this.spaceRow(s, groups, MARK[c] ?? t[c] ?? c, t)];
         if (this.folded.has(`s:${s.id}`)) return rows;
-        for (const g of groups) {
-          const color = colors[g.path] ?? HUES[0];
-          rows.push(this.worktreeRow(s, g, color, t));
-          if (!this.folded.has(`w:${s.id}:${g.path}`)) rows.push(...this.agentRows(g, color, t));
+        for (const run of runs) {
+          const part = run.flatMap((g) => {
+            const color = colors[g.path] ?? HUES[0];
+            return [this.worktreeRow(s, g, color, t), ...(this.folded.has(`w:${s.id}:${g.path}`) ? [] : this.agentRows(g, color, t))];
+          });
+          rows.push(...(run.length > 1 ? [this.stackBox(s, run, part, t)] : part));
         }
         return [...rows, div().h(6).flex_none()];
       });
