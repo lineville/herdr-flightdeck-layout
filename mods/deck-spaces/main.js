@@ -8,7 +8,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome } from "herdr";
+import { spaces, panes, agents, terminals, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome, notify } from "herdr";
 
 // Worktree colors. Kept clear of status colors (green, orange, amber) and the deck's cyan.
 export const HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c4ff", "#e08cff", "#7fa7c9"];
@@ -60,7 +60,12 @@ const PR = {
   merged: { color: "#ab7df8", label: "Merged" }, // GitHub's merged purple; the theme's ansi5 reads as red
   closed: { color: "dim", label: "Closed" },
 };
-const PR_FIELDS = "number,url,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup,baseRefName";
+const PR_FIELDS = "number,url,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup,baseRefName,mergedAt,headRefOid";
+// Merged worktrees sit in a Completed folder; one with no terminals open for this long
+// after its merge is removed. The sweep runs this often.
+export const CLEANUP_AFTER_MS = 7 * 86400000;
+const SWEEP_MS = 30 * 60000;
+const TOUCH_MS = 60000; // how stale a worktree's last-open time may get before it is written again
 const LINEAR_LINK = /https:\/\/linear\.app\/([\w-]+)\/issue\/([A-Za-z][A-Za-z0-9]{0,9}-\d+)/g;
 
 // A Linear ticket ID in a branch ("eng-123-fix", "cursor/eng-123-fix") or a PR title
@@ -165,6 +170,16 @@ export function stackRuns(groups, prOf) {
   return runs;
 }
 
+// Merged worktrees ready to remove: linked checkouts git still lists, with no terminals
+// open, whose merge and last open terminal are both older than CLEANUP_AFTER_MS.
+export function staleMerged(open, touched, now = Date.now()) {
+  return open.filter(({ g, pr }) => {
+    if (!g.done || g.main || !g.git || g.panes.length || !pr?.headRefOid) return false;
+    const last = Math.max(touched[g.path] ?? now, Date.parse(pr.mergedAt ?? "") || 0);
+    return now - last > CLEANUP_AFTER_MS;
+  });
+}
+
 const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
 const base = (p) => (p ?? "").replace(/\/+$/, "").split("/").pop();
 const top = (list) => list.reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
@@ -222,24 +237,90 @@ export default class Spaces extends View {
     this.owners = {}; // GitHub owner -> Promise of its cached avatar path, or null
     this.avatarBusy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("tree.folded") ?? "[]"));
+    this.expanded = new Set(JSON.parse(localStorage.getItem("tree.expanded") ?? "[]")); // Completed folders are folded unless here
+    this.touched = JSON.parse(localStorage.getItem("tree.touched") ?? "{}"); // worktree path -> last time it had a terminal open
+    this.sweptAt = 0;
+    this.sweeping = false;
     cx.timer.every(1000, (cx) => this.refresh(cx));
     this.refresh(cx);
   }
 
   save() {
     localStorage.setItem("tree.folded", JSON.stringify([...this.folded]));
+    localStorage.setItem("tree.expanded", JSON.stringify([...this.expanded]));
+  }
+
+  // Completed folders ("c:<space>") start folded; every other row starts open.
+  isOpen(key) {
+    return key.startsWith("c:") ? this.expanded.has(key) : !this.folded.has(key);
   }
 
   toggle(key, cx) {
-    this.folded.has(key) ? this.folded.delete(key) : this.folded.add(key);
+    const set = key.startsWith("c:") ? this.expanded : this.folded;
+    set.has(key) ? set.delete(key) : set.add(key);
     this.save();
     cx.notify();
+  }
+
+  // Records when each shown worktree last had a terminal open. One seen for the first
+  // time counts as touched now, so it gets the full week before any removal.
+  touch() {
+    const now = Date.now();
+    let changed = false;
+    for (const { g } of this.open) {
+      const at = this.touched[g.path];
+      if (at === undefined || g.panes.length && now - at > TOUCH_MS) { this.touched[g.path] = now; changed = true; }
+    }
+    if (spaces().every((s) => this.wt[s.id]?.list)) {
+      const shown = new Set(this.open.map(({ g }) => g.path));
+      for (const k of Object.keys(this.touched)) if (!shown.has(k)) { delete this.touched[k]; changed = true; }
+    }
+    if (changed) localStorage.setItem("tree.touched", JSON.stringify(this.touched));
+  }
+
+  // Every SWEEP_MS, removes merged worktrees left untouched for CLEANUP_AFTER_MS. Only
+  // when the checkout is still at (or behind) the merged PR's head, and without --force,
+  // so git keeps any checkout with uncommitted changes or submodules.
+  sweep(cx) {
+    const now = Date.now();
+    if (this.sweeping || now - this.sweptAt < SWEEP_MS) return;
+    const due = staleMerged(this.open.map(({ s, g }) => ({ s, g, pr: this.prs[g.path]?.branch === g.branch ? this.prs[g.path].pr : null })), this.touched, now);
+    this.sweptAt = now;
+    if (!due.length) return;
+    this.sweeping = true;
+    cx.spawn(async (cx) => {
+      for (const { s, g, pr } of due) {
+        try {
+          const listed = this.wt[s.id]?.list;
+          const main = listed?.find((w) => w.main)?.path;
+          if (!main || !listed.some((w) => w.path === g.path)) continue;
+          const head = await exec("git", ["rev-parse", "HEAD"], { cwd: g.path, on: s.machine });
+          if (head.code !== 0) continue;
+          if (head.stdout.trim() !== pr.headRefOid) {
+            const behind = await exec("git", ["merge-base", "--is-ancestor", "HEAD", pr.headRefOid], { cwd: g.path, on: s.machine });
+            if (behind.code !== 0) continue; // commits after the merge, or the PR head isn't here
+          }
+          const r = await exec("git", ["worktree", "remove", g.path], { cwd: main, on: s.machine, timeout: 600000 });
+          if (r.code !== 0) continue;
+          this.wt[s.id].list = listed.filter((w) => w.path !== g.path);
+          delete this.touched[g.path];
+          localStorage.setItem("tree.touched", JSON.stringify(this.touched));
+          const kept = shared("deck.kept") ?? {};
+          const next = Object.fromEntries(Object.entries(kept).map(([id, list]) => [id, list.filter((k) => k.path !== g.path)]).filter(([, list]) => list.length));
+          if (JSON.stringify(next) !== JSON.stringify(kept)) setShared("deck.kept", next);
+          notify({ title: "Removed merged worktree", body: `${g.branch} (#${pr.number}) was merged and untouched for 7 days.`, level: "info" });
+        } catch {}
+      }
+      this.sweeping = false;
+      cx.notify();
+    });
   }
 
   // Reads each space's worktrees when it is new, when a pane sits outside every
   // known worktree (one was just made), or every REFRESH_MS while the window is in front.
   refresh(cx) {
     this.refreshPrs(cx);
+    this.sweep(cx);
     this.refreshAvatars(cx);
     if (this.busy) return;
     const now = Date.now();
@@ -486,8 +567,8 @@ export default class Spaces extends View {
     return div().size(7).mx(3).flex_none();
   }
 
-  chevron(key, t, cx) {
-    const open = !this.folded.has(key);
+  chevron(key, t) {
+    const open = this.isOpen(key);
     return div().id(`fold-${key}`).size(16).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.dim)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => { cx.stop_propagation(); this.toggle(key, cx); })
@@ -582,6 +663,7 @@ export default class Spaces extends View {
     if (this.folded.has(`s:${s.id}`)) return `s:${s.id}`;
     const g = groups.find((g) => s.tabs.some((x) => x.active && g.tabs.includes(x.id)));
     if (!g) return `s:${s.id}`;
+    if (g.done && !this.isOpen(`c:${s.id}`)) return `c:${s.id}`;
     const a = !this.folded.has(`w:${s.id}:${g.path}`) && g.agents.find((a) => a.focused);
     return a ? `a:${a.address}` : `w:${s.id}:${g.path}`;
   }
@@ -595,13 +677,29 @@ export default class Spaces extends View {
       .child(String(n));
   }
 
-  worktreeRow(s, g, color, t) {
+  // A space's merged worktrees, folded by default.
+  completedRow(s, done, t) {
+    const key = `c:${s.id}`;
+    const open = this.isOpen(key);
+    const worst = top(done.flatMap((g) => g.agents.map((a) => a.status)));
+    return h_flex().id(`done-${s.id}`).h(26).flex_none().pl(18).pr(6).gap(6).items_center().rounded(7)
+      .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
+      .tooltip("Merged worktrees. Each is removed after 7 days with no terminals open.")
+      .on_click((_e, cx) => this.toggle(key, cx))
+      .child(this.chevron(key, t))
+      .child(svg("mods/deck-spaces/pr/merged.svg").size(12).flex_none().text_color(PR.merged.color))
+      .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.muted).child("Completed"))
+      .child(div().text_size(11).text_color(t.dim).child(String(done.length)))
+      .when(!open && worst && worst !== "idle", (el) => el.child(this.status(t, worst)));
+  }
+
+  worktreeRow(s, g, color, t, indent = 0) {
     const key = `w:${s.id}:${g.path}`;
     const folded = this.folded.has(key);
     const worst = top(g.agents.map((a) => a.status));
     const badge = this.prBadge(s, g, t);
     const empty = g.tabs.length === 0;
-    return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18).pr(6).gap(6).items_center().rounded(7)
+    return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18 + indent).pr(6).gap(6).items_center().rounded(7)
       .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
       .when(empty, (el) => el.tooltip("No terminals open. Click for a terminal here."))
       .on_click(() => {
@@ -620,23 +718,23 @@ export default class Spaces extends View {
       .child(this.plus(`ag-new-${s.id}-${g.path}`, "New Pi agent here", t, () => run("tab.new", { space: s.id, folder: g.path, name: g.branch, argv: ["pi"] })));
   }
 
-  agentRows(g, color, t) {
+  agentRows(g, color, t, indent = 0) {
     const cwdOf = new Map(this.ps.map((p) => [p.pane, p.cwd]));
     return g.agents.flatMap((a) => {
       const p = a.program;
       const pic = p?.icon ? (p.tint ? svg(p.icon).size(13).flex_none().text_color(t.muted) : image(p.icon).w(13).h(13).flex_none()) : div().w(13);
       const quiet = a.status === "idle" && !a.focused;
-      const head = h_flex().id(`ag-${a.address}`).h(24).flex_none().pl(40).pr(8).gap(7).items_center().rounded(7).text_size(12.5).cursor_pointer()
+      const head = h_flex().id(`ag-${a.address}`).h(24).flex_none().pl(40 + indent).pr(8).gap(7).items_center().rounded(7).text_size(12.5).cursor_pointer()
         .when(this.lit === `a:${a.address}`, (el) => el.bg(t.selected)).when(this.lit !== `a:${a.address}`, (el) => el.hover((st) => st.bg(t.hover)))
         .on_click(() => run("pane.focus", { pane: a.pane }))
-        .child(div().absolute().left(25).top(0).bottom(0).w(1).bg(color + "66"))
+        .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(pic)
         .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).child(agentLabel(a, cwdOf.get(a.pane))))
         .child(this.status(t, a.status));
-      const subs = this.kids(a.address).map(({ k, depth }) => h_flex().id(`sub-${k.address}`).h(22).flex_none().pl(40 + 12 * depth).pr(8).gap(7).items_center().rounded(7).text_size(12).cursor_pointer()
+      const subs = this.kids(a.address).map(({ k, depth }) => h_flex().id(`sub-${k.address}`).h(22).flex_none().pl(40 + indent + 12 * depth).pr(8).gap(7).items_center().rounded(7).text_size(12).cursor_pointer()
         .hover((st) => st.bg(t.hover))
         .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : run("terminal.peek", { terminal: k.address })))
-        .child(div().absolute().left(25).top(0).bottom(0).w(1).bg(color + "66"))
+        .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(div().flex_none().text_color(t.dim).child("\u2514"))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(k.name || k.template || k.program?.name || k.address))
         .child(this.status(t, k.status === "error" ? "blocked" : k.status === "done" ? "idle" : this.listed.get(k.address) ?? k.status)));
@@ -668,13 +766,18 @@ export default class Spaces extends View {
     const tops = list.filter((a) => !nested.has(a.address));
     const kept = shared("deck.kept") ?? {};
     const prOf = (g) => (this.prs[g.path]?.branch === g.branch ? this.prs[g.path].pr : null);
+    // Merged worktrees leave their stacks and go to the space's Completed folder, last.
     const trees = sp.map((s) => {
-      const runs = stackRuns(this.groups(s, this.ps, tops.filter((a) => a.space === s.id), kept[s.id] ?? []), prOf);
-      return { s, runs, groups: runs.flat() };
+      const all = this.groups(s, this.ps, tops.filter((a) => a.space === s.id), kept[s.id] ?? []);
+      for (const g of all) g.done = !g.main && prOf(g)?.state === "MERGED";
+      const done = all.filter((g) => g.done);
+      const runs = stackRuns(all.filter((g) => !g.done), prOf);
+      return { s, runs, done, groups: [...runs.flat(), ...done] };
     });
     this.keep(trees, kept);
     this.lit = this.litRow(trees);
     this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
+    this.touch();
     const colors = this.colors(trees);
     const spaceColors = this.spaceColors(sp);
     this.avatarUse = new Map();
@@ -691,7 +794,7 @@ export default class Spaces extends View {
     const newSpace = () => pickFolder({ prompt: "Open a repository as a space" }).then((folder) => folder && run("space.new", { folder }));
     const body = narrow
       ? this.rail(trees, spaceColors, t)
-      : trees.flatMap(({ s, groups, runs }) => {
+      : trees.flatMap(({ s, groups, runs, done }) => {
         const c = spaceColors[s.id] ?? "ansi6";
         const rows = [this.spaceRow(s, groups, MARK[c] ?? t[c] ?? c, t)];
         if (this.folded.has(`s:${s.id}`)) return rows;
@@ -701,6 +804,13 @@ export default class Spaces extends View {
             return [this.worktreeRow(s, g, color, t), ...(this.folded.has(`w:${s.id}:${g.path}`) ? [] : this.agentRows(g, color, t))];
           });
           rows.push(...(run.length > 1 ? [this.stackBox(s, run, part, t)] : part));
+        }
+        if (done.length) {
+          rows.push(this.completedRow(s, done, t));
+          if (this.isOpen(`c:${s.id}`)) for (const g of done) {
+            const color = colors[g.path] ?? HUES[0];
+            rows.push(this.worktreeRow(s, g, color, t, 12), ...(this.folded.has(`w:${s.id}:${g.path}`) ? [] : this.agentRows(g, color, t, 12)));
+          }
         }
         return [...rows, div().h(6).flex_none()];
       });
