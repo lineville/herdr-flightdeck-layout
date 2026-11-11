@@ -1,12 +1,28 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews,
 // and a search box that finds files by name anywhere under that folder.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, InputState, Input, TextView } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, shared } from "herdr";
 
 const INDEX_MAX = 100000; // files the search knows about
 const INDEX_TTL = 10000; // a search reads the file list again when it is older than this
 const RESULTS = 100;
+const MARKDOWN = /\.(md|markdown|mdx|mdown|mkd)$/i;
+
+// A link in a Markdown file, as a path under the panel's folder: relative to the file's
+// folder, without its #anchor. null for a URL with a scheme, an anchor alone, or a
+// path that leaves the folder.
+export function linkedFile(from, url) {
+  const target = url.split("#")[0];
+  if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) return null;
+  const parts = target.startsWith("/") ? [] : from.split("/").slice(0, -1);
+  for (const part of decodeURIComponent(target).split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") { if (!parts.length) return null; parts.pop(); }
+    else parts.push(part);
+  }
+  return parts.join("/") || null;
+}
 
 // Paths matching `query` by name, best first: the query inside the file name (at its
 // start best), then inside the path, then its letters in order anywhere in the path
@@ -105,11 +121,12 @@ async function directory(path, on) {
 export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map();
-    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.markdown = null;
     this.handle = cx.focus_handle();
     this.query = ""; this.results = []; this.at = 0;
     this.index = null; this.indexKey = null; this.indexAt = 0; this.indexing = false;
     this.stamp = null; // the last shared "files.search" request acted on
+    this.source = localStorage.getItem("markdown.view") === "source"; // Markdown shows rendered unless switched
     this.input = InputState.new({ placeholder: "Search files by name" });
     this.input.on("change", (_e, cx) => this.search(this.input.value(), cx));
     this.input.on("submit", (_e, cx) => this.openResult(cx));
@@ -245,7 +262,7 @@ export default class Files extends View {
   }
 
   show(path, cx) {
-    this.code?.release(); this.code = null; this.file = path; this.fileError = null;
+    this.code?.release(); this.code = null; this.file = path; this.fileError = null; this.markdown = null;
     if (!path || !cx) return;
     const context = this.context, root = this.root, on = this.on;
     cx.spawn(async cx => {
@@ -254,6 +271,7 @@ export default class Files extends View {
         if (this.file !== path || !this.current(context)) return;
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
+        if (MARKDOWN.test(path)) this.markdown = text.length > 400000 ? text.slice(0, 400000) + "\n\n… (file truncated)" : text;
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
         this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
           value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
@@ -306,6 +324,33 @@ export default class Files extends View {
           .child(svg("mods/deck-files/x.svg").size(11)))));
   }
 
+  // A link clicked in rendered Markdown: web and mail links open in the browser, links to
+  // files in this folder open here, anything else is left alone.
+  openLink(url, cx) {
+    if (/^(https?|mailto):/i.test(url)) { exec("open", [url]).catch(() => {}); return; }
+    const path = linkedFile(this.file ?? "", url);
+    if (path) { this.show(path, cx); cx.notify(); }
+  }
+
+  // Rendered or source, for Markdown files; saved per copy.
+  viewToggle(t) {
+    const pill = (id, label, on, source) => div().id(id).h(22).px(8).flex().items_center().rounded(5).text_size(11.5).cursor_pointer()
+      .when(on, el => el.bg(t.selected).text_color(t.foreground)).when(!on, el => el.text_color(t.muted).hover(s => s.bg(t.hover)))
+      .on_click((_e, cx) => { this.source = source; localStorage.setItem("markdown.view", source ? "source" : "preview"); cx.notify(); })
+      .child(label);
+    return h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border)
+      .child(pill("md-preview", "Preview", !this.source, false))
+      .child(pill("md-source", "Source", this.source, true));
+  }
+
+  preview(t) {
+    if (this.markdown !== null && !this.source) {
+      return v_flex().id("md-scroll").flex_1().min_h(0).overflow_y_scrollbar().px(18).py(14).text_size(13.5).text_color(t.foreground)
+        .child(TextView.markdown(`md-${this.file}`, this.markdown).selectable(true).on_link_click((url, cx) => this.openLink(url, cx)));
+    }
+    return this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…");
+  }
+
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
     // Cmd+Shift+O (through deck-tabs) asks for the search box with a fresh shared stamp.
@@ -324,7 +369,8 @@ export default class Files extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
+        .when(this.markdown !== null && Boolean(this.file), el => el.child(this.viewToggle(t))))
       .when(!this.file, el => el.child(this.searchBar(t)))
       .when(!this.file && searching, el => el.child(v_flex().id("files-hits").flex_1().min_h(0).overflow_y_scrollbar().p(6)
         .child(div().px(8).pb(4).text_size(11).text_color(t.dim).child(status))
@@ -332,6 +378,6 @@ export default class Files extends View {
       .when(!this.file && !searching, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      .when(Boolean(this.file), el => el.child(this.preview(t)));
   }
 }
