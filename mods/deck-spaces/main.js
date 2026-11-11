@@ -19,9 +19,27 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const REFRESH_MS = 20000;
 const PR_REFRESH_MS = 60000;
 const RAIL = 160;
-// Space avatars: the GitHub owner's picture for the space's `origin`, cached under the
-// app folder (where image() looks) and fetched again after a week.
+// Space avatars: the GitHub organization's logo for the space's `origin`, cached under the
+// app folder (where image() looks) and fetched again after a week. A personal account's
+// photo isn't a project image, so repos owned by a user keep their letter.
 const AVATAR_DIR = "cache/repo-avatars";
+// Prints "org" when <owner>.png is an organization's logo, "user" for a personal account,
+// "none" when it couldn't tell or fetch. Owner type and logo are each kept for 7 days.
+const AVATAR_SCRIPT = `
+cd "$1" || exit 1; o=$2
+if [ -z "$(find "$o.type" -mtime -7 2>/dev/null)" ]; then
+  t=$(curl -fsSL --max-time 15 "https://api.github.com/users/$o" | grep -o '"type": *"[A-Za-z]*"' | head -1 | tr -d '" ' | cut -d: -f2)
+  [ -n "$t" ] && printf %s "$t" > "$o.type"
+fi
+t=$(cat "$o.type" 2>/dev/null)
+[ -z "$t" ] && { echo none; exit 0; }
+[ "$t" = Organization ] || { rm -f "$o.png"; echo user; exit 0; }
+if [ -z "$(find "$o.png" -mtime -7 2>/dev/null)" ]; then
+  curl -fsSL --max-time 15 -o "$o.png.part" "https://github.com/$o.png?size=96" && mv -f "$o.png.part" "$o.png" || rm -f "$o.png.part"
+fi
+[ -s "$o.png" ] && echo org || echo none
+`;
+const AVATAR_INSET = 2; // the logo sits this far inside its tile, so a full-bleed logo isn't clipped by the corners
 const AVATAR_RETRY_MS = 10 * 60 * 1000; // a space with no avatar asks again after this
 
 // The GitHub owner in a remote URL ("git@github.com:o/r.git", "https://github.com/o/r"), or null.
@@ -237,29 +255,31 @@ export default class Spaces extends View {
     });
   }
 
-  // The owner's avatar as a path image() takes, downloading it if it is missing or a week old.
-  avatarFile(owner) {
+  // The organization's logo as a path image() takes, or null for a personal account or
+  // when it couldn't be fetched (asked again on the next lookup).
+  async avatarFile(owner) {
     const name = owner.toLowerCase();
     this.owners[name] ??= (async () => {
-      const rel = `${AVATAR_DIR}/${name}.png`;
-      const abs = `${appHome()}/${rel}`;
-      const fresh = await exec("find", [abs, "-mtime", "-7"]).catch(() => null);
-      if (fresh?.code === 0 && fresh.stdout.trim()) return rel;
-      await exec("mkdir", ["-p", `${appHome()}/${AVATAR_DIR}`]);
-      const got = await exec("curl", ["-fsSL", "--max-time", "15", "-o", `${abs}.part`, `https://github.com/${name}.png?size=96`]).catch(() => null);
-      if (got?.code === 0 && (await exec("mv", ["-f", `${abs}.part`, abs])).code === 0) return rel;
-      const old = await exec("test", ["-s", abs]).catch(() => null);
-      return old?.code === 0 ? rel : null;
+      const dir = `${appHome()}/${AVATAR_DIR}`;
+      await exec("mkdir", ["-p", dir]);
+      const r = await exec("sh", ["-c", AVATAR_SCRIPT, "sh", dir, name], { timeout: 40000 }).catch(() => null);
+      return r?.code === 0 ? r.stdout.trim() : "none";
     })();
     const p = this.owners[name];
-    p.then((rel) => { if (!rel && this.owners[name] === p) delete this.owners[name]; });
-    return p;
+    const kind = await p;
+    if (kind === "none" && this.owners[name] === p) delete this.owners[name];
+    return kind === "org" ? `${AVATAR_DIR}/${name}.png` : null;
   }
 
-  // A space's mark: its GitHub owner's avatar, else its initial on its color.
+  // A space's mark: its organization's logo, else its initial on its color. A logo that
+  // more than one space shows sits on the space's color, so those spaces stay apart.
   mark(s, fill, size, text) {
     const pic = this.avatars[s.id]?.path;
-    if (pic) return image(pic).size(size).flex_none().rounded(5);
+    if (pic) {
+      const shared = (this.avatarUse?.get(pic) ?? 0) > 1;
+      return h_flex().size(size).flex_none().rounded(5).items_center().justify_center().when(shared, (el) => el.bg(fill))
+        .child(image(pic).size(size - 2 * AVATAR_INSET).flex_none());
+    }
     return h_flex().size(size).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(text).font_bold().text_color("#ffffff").child([...s.name][0]?.toUpperCase() ?? "?");
   }
 
@@ -581,6 +601,11 @@ export default class Spaces extends View {
     this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
     const colors = this.colors(trees);
     const spaceColors = this.spaceColors(sp);
+    this.avatarUse = new Map();
+    for (const s of sp) {
+      const pic = this.avatars[s.id]?.path;
+      if (pic) this.avatarUse.set(pic, (this.avatarUse.get(pic) ?? 0) + 1);
+    }
     this.publish(trees, colors);
     setAgentOrder(trees.flatMap(({ groups }) => groups.flatMap((g) => g.agents.map((a) => a.address))));
 
