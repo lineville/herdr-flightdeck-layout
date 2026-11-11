@@ -36,7 +36,8 @@ const saveView = (v) => store.set(VIEW_KEY, v);
 const MANIFEST_KEY = "flightdeck.manifest";
 const MANIFEST_HEAD = 32; // the header: all that shows when collapsed
 const MANIFEST_SNAP = 64; // dragged shorter than this, it collapses
-const MANIFEST_MIN_OPEN = 76; // open, it shows at least the header and one row
+const MANIFEST_MIN_OPEN = 76; // dragged open, it shows at least the header and one row
+const MANIFEST_EMPTY = 41; // the "No agents in view." note: 12px padding around a 17px line
 const loadManifest = () => store.get(MANIFEST_KEY, (m) => m && typeof m.collapsed === "boolean" && (m.height == null || Number.isFinite(m.height)), { collapsed: false, height: null });
 const saveManifest = (m) => store.set(MANIFEST_KEY, m);
 
@@ -137,7 +138,8 @@ export default class FlightDeck extends View {
     this.look = loadView();
     this.press = null;
     this.dragged = false;
-    this.manifest_ = loadManifest();
+    // A dragged height lasts until the panel is resized or reopened; then it fits the crew.
+    this.manifest_ = { ...loadManifest(), height: null };
     this.resizing = null;
     this.telemetry = new Map(); // address -> { ctx 0..1, model }
     const p = props() ?? {};
@@ -362,6 +364,7 @@ export default class FlightDeck extends View {
     this.dur = dur;
     this.now = this.clock();
     if (!this.size) return;
+    this.placedH = this.consoleH(this.size.height); // render re-places when the crew changes this
     const vp = this.viewport();
     const shown = this.shown();
     this.cells = grid(shown.length, vp.w, vp.h).map((cell, i) => ({ ...cell, space: shown[i] }));
@@ -402,9 +405,22 @@ export default class FlightDeck extends View {
     const most = Math.max(MANIFEST_HEAD, h - HUD_H - 120);
     if (this.manifest_.collapsed) return MANIFEST_HEAD;
     if (this.manifest_.height != null) return Math.round(Math.min(Math.max(this.manifest_.height, MANIFEST_MIN_OPEN), most));
+    return Math.round(Math.min(this.fitH(), most));
+  }
+
+  // The manifest's height with every row showing and no space left over: its top rule,
+  // the header, then the rows (or the empty note).
+  fitH() {
     const rows = this.rows ?? [];
     const px = rows.reduce((sum, r) => sum + (r.kind === "agent" ? ROW_H : HEAD_H), 0);
-    return Math.round(Math.min(Math.max(44 + px, 112), h * 0.36, most));
+    return 1 + MANIFEST_HEAD + (rows.length ? px : MANIFEST_EMPTY);
+  }
+
+  // Drops a dragged height, so the manifest fits the crew again.
+  snapManifest() {
+    if (this.manifest_.height == null) return;
+    this.manifest_ = { ...this.manifest_, height: null };
+    saveManifest(this.manifest_);
   }
 
   resizeTo(y) {
@@ -476,13 +492,15 @@ export default class FlightDeck extends View {
       .on_hover((hovered, cx) => { if (!hovered) this.endResize(cx); })
       .on_size_change((size, cx) => {
         const z = Number(settings()?.zoom) || 1;
-        this.size = { width: size.width / z, height: size.height / z };
+        const next = { width: size.width / z, height: size.height / z };
+        if (this.size && (Math.abs(next.width - this.size.width) > 0.5 || Math.abs(next.height - this.size.height) > 0.5) && !this.resizing) this.snapManifest();
+        this.size = next;
         this.orbitCache = null;
         this.place(this.clock(), 0);
         cx.notify();
       });
     if (!this.size) return root;
-    if (!this.cams.size && shown.length) this.place(this.clock(), 0);
+    if (!this.cams.size && shown.length || this.consoleH(this.size.height) !== this.placedH) this.place(this.clock(), 0);
     const vp = this.viewport();
 
     return root
@@ -789,7 +807,7 @@ export default class FlightDeck extends View {
       .hover((st) => st.bg(C.surface2).border_color(C.borderActive))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
-        this.manifest_ = { ...this.manifest_, collapsed: !collapsed };
+        this.manifest_ = collapsed ? { collapsed: false, height: null } : { ...this.manifest_, collapsed: true };
         saveManifest(this.manifest_);
         this.place(this.clock(), 0);
         cx.notify();
