@@ -550,7 +550,7 @@ export default class Spaces extends View {
     const all = groups.flatMap((g) => g.agents);
     const worst = top(all.map((a) => a.status));
     return h_flex().id(`space-${s.id}`).h(30).flex_none().pl(4).pr(6).gap(6).items_center().rounded(7)
-      .when(s.active, (el) => el.bg(t.selected)).when(!s.active, (el) => el.hover((st) => st.bg(t.hover)))
+      .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
       .on_click(() => run("space.select", { id: s.id }))
       .on_mouse_down("right", () => this.menu({ kind: "space", space: s.id }))
       .child(this.chevron(key, t))
@@ -568,15 +568,27 @@ export default class Spaces extends View {
       .children(rows);
   }
 
+  // The one row that shows the selection: the focused agent when its row is visible, else
+  // the shown tab's worktree, else the shown space (folded, or with no tab shown).
+  litRow(trees) {
+    const at = trees.find(({ s }) => s.active);
+    if (!at) return null;
+    const { s, groups } = at;
+    if (this.folded.has(`s:${s.id}`)) return `s:${s.id}`;
+    const g = groups.find((g) => s.tabs.some((x) => x.active && g.tabs.includes(x.id)));
+    if (!g) return `s:${s.id}`;
+    const a = !this.folded.has(`w:${s.id}:${g.path}`) && g.agents.find((a) => a.focused);
+    return a ? `a:${a.address}` : `w:${s.id}:${g.path}`;
+  }
+
   worktreeRow(s, g, color, t) {
     const key = `w:${s.id}:${g.path}`;
     const folded = this.folded.has(key);
-    const shown = s.active && s.tabs.find((x) => x.active && g.tabs.includes(x.id));
     const worst = top(g.agents.map((a) => a.status));
     const badge = this.prBadge(s, g, t);
     const empty = g.tabs.length === 0;
     return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18).pr(6).gap(6).items_center().rounded(7)
-      .when(Boolean(shown), (el) => el.bg(t.hover)).hover((st) => st.bg(t.hover))
+      .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
       .when(empty, (el) => el.tooltip("No terminals open. Click for a terminal here."))
       .on_click(() => {
         run("space.select", { id: s.id });
@@ -600,7 +612,7 @@ export default class Spaces extends View {
       const pic = p?.icon ? (p.tint ? svg(p.icon).size(13).flex_none().text_color(t.muted) : image(p.icon).w(13).h(13).flex_none()) : div().w(13);
       const quiet = a.status === "idle" && !a.focused;
       const head = h_flex().id(`ag-${a.address}`).h(24).flex_none().pl(40).pr(8).gap(7).items_center().rounded(7).text_size(12.5).cursor_pointer()
-        .when(a.focused, (el) => el.bg(t.selected)).when(!a.focused, (el) => el.hover((st) => st.bg(t.hover)))
+        .when(this.lit === `a:${a.address}`, (el) => el.bg(t.selected)).when(this.lit !== `a:${a.address}`, (el) => el.hover((st) => st.bg(t.hover)))
         .on_click(() => run("pane.focus", { pane: a.pane }))
         .child(div().absolute().left(25).top(0).bottom(0).w(1).bg(color + "66"))
         .child(pic)
@@ -646,6 +658,7 @@ export default class Spaces extends View {
       return { s, runs, groups: runs.flat() };
     });
     this.keep(trees, kept);
+    this.lit = this.litRow(trees);
     this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
     const colors = this.colors(trees);
     const spaceColors = this.spaceColors(sp);
