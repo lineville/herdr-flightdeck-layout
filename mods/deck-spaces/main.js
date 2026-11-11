@@ -126,6 +126,8 @@ export function prState(pr, now = Date.now()) {
 // A space's worktrees as runs to draw together: a PR stack (an open PR whose base is another
 // shown worktree's branch) is one run, base first and each PR under the one it targets;
 // every other worktree is a run of one. A run sits where its first worktree was.
+// Each worktree in a stack gets `stack: { n, of, onto }`: its place counting from the base
+// (1), the stack's size, and the branch its PR targets.
 export function stackRuns(groups, prOf) {
   const byBranch = new Map(groups.filter((g) => g.git && !g.main).map((g) => [g.branch, g]));
   const parent = new Map();
@@ -148,13 +150,16 @@ export function stackRuns(groups, prOf) {
   for (const g of groups) {
     if (placed.has(g)) continue;
     const run = [];
-    const walk = (n) => {
+    const depth = new Map();
+    const walk = (n, d) => {
       if (placed.has(n)) return;
       placed.add(n);
       run.push(n);
-      for (const k of kids.get(n) ?? []) walk(k);
+      depth.set(n, d);
+      for (const k of kids.get(n) ?? []) walk(k, d + 1);
     };
-    walk(rootOf(g));
+    walk(rootOf(g), 1);
+    if (run.length > 1) for (const n of run) n.stack = { n: depth.get(n), of: run.length, onto: run.includes(parent.get(n)) ? parent.get(n).branch : null };
     runs.push(run);
   }
   return runs;
@@ -581,6 +586,15 @@ export default class Spaces extends View {
     return a ? `a:${a.address}` : `w:${s.id}:${g.path}`;
   }
 
+  // A stacked worktree's place in its stack, counting from the base PR.
+  stackNumber(s, g, t) {
+    const { n, of, onto } = g.stack;
+    return h_flex().id(`stack-n-${s.id}-${g.path}`).h(15).min_w(15).px(3).flex_none().rounded(4).items_center().justify_center()
+      .border_1().border_color(t.border).text_size(10).font_semibold().text_color(t.muted)
+      .tooltip(onto ? `Stack ${n} of ${of}, on ${onto}` : `Stack ${n} of ${of}, the base`)
+      .child(String(n));
+  }
+
   worktreeRow(s, g, color, t) {
     const key = `w:${s.id}:${g.path}`;
     const folded = this.folded.has(key);
@@ -598,6 +612,7 @@ export default class Spaces extends View {
       .on_mouse_down("right", () => this.worktreeMenu(s, g))
       .child(g.agents.length ? this.chevron(key, t) : div().w(16).flex_none())
       .child(div().size(8).flex_none().rounded(4).bg(color))
+      .when(Boolean(g.stack), (el) => el.child(this.stackNumber(s, g, t)))
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(empty ? t.muted : t.foreground).child(g.branch))
       .when(folded && g.agents.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(g.agents.length))))
       .when(folded && worst && worst !== "idle", (el) => el.child(this.status(t, worst)))
