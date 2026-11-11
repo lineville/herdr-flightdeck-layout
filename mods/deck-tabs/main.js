@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, agents, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, agents, run, openOverlay, theme, window, shared, setShared, layout, settings, nextCommand } from "herdr";
 
 const base = (p) => (p ?? "").replace(/\/+$/, "").split("/").pop();
 // Pi's session name from its title ("π - <name> - <folder>"), or null.
@@ -24,9 +24,22 @@ function find(node, id) {
 }
 
 export default class Tabs extends View {
-  init() {
+  init(_props, cx) {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    // `deck-tabs.files-search` (Cmd+Shift+O): show the Files panel and ask it, through
+    // shared "files.search", to focus its search box. The tab bar is always shown, so
+    // the key reaches it even while the panel is closed.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c !== "files-search" && c?.name !== "files-search") continue;
+        run("layout.select", { stack: "panel-body", child: "files" });
+        run("layout.show", { id: "panel" });
+        setShared("files.search", Date.now());
+        cx.notify();
+      }
+    });
   }
 
   // The side panel is remembered per space: switching shows that space's choice
