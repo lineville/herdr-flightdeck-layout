@@ -241,6 +241,8 @@ export default class Spaces extends View {
     this.touched = JSON.parse(localStorage.getItem("tree.touched") ?? "{}"); // worktree path -> last time it had a terminal open
     this.sweptAt = 0;
     this.sweeping = false;
+    this.drag = null; // the row being dragged: { kind, id, group, index }
+    this.over = null; // the row it would land on, "<kind>:<id>"
     cx.timer.every(1000, (cx) => this.refresh(cx));
     this.refresh(cx);
   }
@@ -630,12 +632,56 @@ export default class Spaces extends View {
     this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, empty, pr, ticket }, 36 + count * 30);
   }
 
+  // Drag to reorder: press a row and release it on another row of the same kind and
+  // group. While dragged, the source dims and an accent line shows where it lands:
+  // under the target when moving down, above it when moving up.
+  draggable(el, item, t, drop) {
+    const key = `${item.kind}:${item.id}`;
+    const d = this.drag;
+    const mine = d && d.kind === item.kind && d.id === item.id;
+    const over = d && !mine && this.over === key;
+    return el.relative()
+      .when(Boolean(mine) && this.over !== key, (el) => el.opacity(0.5))
+      .when(Boolean(over), (el) => el.child(div().absolute().left(0).right(0).h(2).rounded(1).bg(t.accent)
+        .when(d.index < item.index, (line) => line.bottom(0)).when(d.index > item.index, (line) => line.top(0))))
+      .on_mouse_down("left", () => { this.drag = item; this.over = key; })
+      .on_mouse_move((_e, cx) => {
+        const d = this.drag;
+        if (!d) return;
+        const next = d.kind === item.kind && d.group === item.group ? key : null;
+        if (this.over !== next) { this.over = next; cx.notify(); }
+      })
+      .on_mouse_up("left", (_e, cx) => {
+        const d = this.drag;
+        const landed = d && this.over === key && d.id !== item.id;
+        this.drag = null;
+        this.over = null;
+        if (landed) drop(d);
+        cx.notify();
+      });
+  }
+
+  // Moves a worktree in its space's kept list, before `to` when moving up, after it
+  // when moving down. The tree sorts worktrees by that list.
+  moveWorktree(space, from, to) {
+    const kept = shared("deck.kept") ?? {};
+    const list = [...(kept[space] ?? [])];
+    const i = list.findIndex((k) => k.path === from);
+    const j = list.findIndex((k) => k.path === to);
+    if (i < 0 || j < 0 || i === j) return;
+    const [item] = list.splice(i, 1);
+    list.splice(j, 0, item);
+    setShared("deck.kept", { ...kept, [space]: list });
+  }
+
   spaceRow(s, groups, fill, t) {
     const key = `s:${s.id}`;
     const folded = this.folded.has(key);
     const all = groups.flatMap((g) => g.agents);
     const worst = top(all.map((a) => a.status));
-    return h_flex().id(`space-${s.id}`).h(30).flex_none().pl(4).pr(6).gap(6).items_center().rounded(7)
+    const index = spaces().findIndex((x) => x.id === s.id);
+    const item = { kind: "s", id: s.id, group: s.machine ?? "", index };
+    return this.draggable(h_flex(), item, t, (d) => run("space.move", { id: d.id, index: index + 1 })).id(`space-${s.id}`).h(30).flex_none().pl(4).pr(6).gap(6).items_center().rounded(7)
       .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
       .on_click(() => run("space.select", { id: s.id }))
       .on_mouse_down("right", () => this.menu({ kind: "space", space: s.id }))
@@ -699,7 +745,12 @@ export default class Spaces extends View {
     const worst = top(g.agents.map((a) => a.status));
     const badge = this.prBadge(s, g, t);
     const empty = g.tabs.length === 0;
-    return h_flex().id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18 + indent).pr(6).gap(6).items_center().rounded(7)
+    // Linked worktrees move within their section (open or Completed); the main checkout stays first.
+    const index = (this.keptNow[s.id] ?? []).findIndex((k) => k.path === g.path);
+    const row = g.git && !g.main && index >= 0
+      ? this.draggable(h_flex(), { kind: "w", id: g.path, group: `${s.id}:${g.done ? "done" : "open"}`, index }, t, (d) => this.moveWorktree(s.id, d.id, g.path))
+      : h_flex();
+    return row.id(`wt-${s.id}-${g.path}`).h(26).flex_none().pl(18 + indent).pr(6).gap(6).items_center().rounded(7)
       .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
       .when(empty, (el) => el.tooltip("No terminals open. Click for a terminal here."))
       .on_click(() => {
@@ -765,6 +816,7 @@ export default class Spaces extends View {
     const nested = new Set(list.flatMap((a) => this.kids(a.address).map((x) => x.k.address)));
     const tops = list.filter((a) => !nested.has(a.address));
     const kept = shared("deck.kept") ?? {};
+    this.keptNow = kept;
     const prOf = (g) => (this.prs[g.path]?.branch === g.branch ? this.prs[g.path].pr : null);
     // Merged worktrees leave their stacks and go to the space's Completed folder, last.
     const trees = sp.map((s) => {
@@ -815,7 +867,9 @@ export default class Spaces extends View {
         return [...rows, div().h(6).flex_none()];
       });
 
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
+    const endDrag = (_e, cx) => { if (!this.drag) return; this.drag = null; this.over = null; cx.notify(); };
+    return v_flex().id("deck-spaces").size_full().min_h(0).bg(t.chrome).text_size(13)
+      .on_mouse_up("left", endDrag).on_mouse_down_out(endDrag)
       .child(h_flex().h(31).flex_none().pl(narrow ? 0 : 14).pr(narrow ? 0 : 8).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(narrow, (el) => el.justify_center())
         .when(!narrow, (el) => el.child(h_flex().gap(8).items_center()
