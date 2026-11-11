@@ -1,12 +1,12 @@
 // A tiny Spotify player. In a layout block (the Flight Deck status bar) it is a
-// slim now-playing item with play/pause; clicking it toggles a popup player
-// (mod.open spotify-mini) with artwork, progress, and -15s, previous,
-// play/pause, next and +15s. Talks to the Spotify app on macOS through
+// slim now-playing item with -15s, previous, play/pause, next and +15s;
+// clicking the track toggles a popup player (mod.open spotify-mini) with
+// artwork, progress, the same controls and a close button. Talks to the Spotify app on macOS through
 // osascript; it never launches Spotify by itself.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, props, run, theme, appHome } from "herdr";
+import { exec, props, run, theme, appHome, closeOverlay } from "herdr";
 
 const DIR = "mods/spotify-mini";
 const ART_DIR = "cache/spotify-mini"; // under the app home, outside the mod folder so saves don't reload it
@@ -143,6 +143,16 @@ export default class SpotifyMini extends View {
       .when(Boolean(label), (el) => el.child(div().text_size(10).font_semibold().child(label)));
   }
 
+  controls(prefix, t, small) {
+    const s = small ? 11 : 13;
+    return h_flex().flex_none().items_center().gap(small ? 0 : 6)
+      .child(this.button(`${prefix}-back`, "back15", small ? 10 : 13, SKIP(-15), t, "15"))
+      .child(this.button(`${prefix}-prev`, "prev", s, this.tell("previous track"), t))
+      .child(this.button(`${prefix}-play`, this.state === "playing" ? "pause" : "play", small ? 12 : 18, this.tell("playpause"), t))
+      .child(this.button(`${prefix}-next`, "next", s, this.tell("next track"), t))
+      .child(this.button(`${prefix}-fwd`, "fwd15", small ? 10 : 13, SKIP(15), t, "15"));
+  }
+
   renderBar(t) {
     const live = this.live;
     const playing = this.state === "playing";
@@ -150,23 +160,24 @@ export default class SpotifyMini extends View {
     return h_flex()
       .id("spotify-bar")
       .size_full()
-      .pl(12)
-      .pr(6)
-      .gap(8)
+      .pl(6)
+      .pr(8)
+      .gap(6)
       .items_center()
       .bg(t.chrome)
       .border_t(1)
-      .border_l(1)
+      .border_r(1)
       .border_color(t.border)
       .text_size(11.8)
       .text_color(t.muted)
-      .cursor_pointer()
-      .hover((s) => s.bg(t.hover))
-      .on_click(() => run("mod.open", { name: "spotify-mini" }))
-      .child(div().flex_none().text_color(playing ? t.accent : t.dim).child(svg(`${DIR}/note.svg`).size(13)))
-      .child(div().flex_1().min_w(0).truncate().text_color(live ? t.foreground : t.dim).child(text))
-      .when(live, (el) => el.child(
-        this.button("bar-play", playing ? "pause" : "play", 11, this.tell("playpause"), t)));
+      .when(live, (el) => el.child(this.controls("bar", t, true)))
+      .child(
+        h_flex().id("bar-open").flex_1().min_w(0).h_full().px(6).gap(8).items_center().rounded(4)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click(() => run("mod.open", { name: "spotify-mini" }))
+          .child(div().flex_none().text_color(playing ? t.accent : t.dim).child(svg(`${DIR}/note.svg`).size(13)))
+          .child(div().flex_1().min_w(0).truncate().text_color(live ? t.foreground : t.dim).child(text)));
   }
 
   renderPopup(t) {
@@ -190,12 +201,12 @@ export default class SpotifyMini extends View {
         .child(div().h(3).rounded(2).bg(t.accent).w(barW * frac)))
       .child(div().w(34).flex_none().text_right().child(live ? fmt(tr.dur) : ""));
 
-    const controls = h_flex().items_center().justify_center().gap(6)
-      .child(this.button("sp-back", "back15", 13, SKIP(-15), t, "15"))
-      .child(this.button("sp-prev", "prev", 14, this.tell("previous track"), t))
-      .child(this.button("sp-play", this.state === "playing" ? "pause" : "play", 18, this.tell("playpause"), t))
-      .child(this.button("sp-next", "next", 14, this.tell("next track"), t))
-      .child(this.button("sp-fwd", "fwd15", 13, SKIP(15), t, "15"));
+    const overlay = props()?.overlay;
+    const close = div().id("sp-close").flex_none().size(22).rounded(11).flex().items_center().justify_center()
+      .cursor_pointer().text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Close")
+      .on_click(() => closeOverlay(overlay))
+      .child(svg(`${DIR}/close.svg`).size(11));
 
     return v_flex()
       .id("spotify-popup")
@@ -205,9 +216,9 @@ export default class SpotifyMini extends View {
       .gap(8)
       .bg(t.popover)
       .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
-      .child(h_flex().items_center().gap(12).child(art).child(info))
+      .child(h_flex().items_start().gap(12).child(art).child(info.pt(4)).child(close))
       .child(progress)
-      .child(controls);
+      .child(h_flex().justify_center().child(this.controls("sp", t, false)));
   }
 
   render() {
