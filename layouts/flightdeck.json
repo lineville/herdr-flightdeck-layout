@@ -162,14 +162,31 @@
           "gap": 8
         },
         {
-          "id": "status",
-          "type": "block",
-          "content": {
-            "mod": "workspace-status"
-          },
+          "id": "status-row",
+          "type": "row",
           "size": {
             "px": 28
-          }
+          },
+          "resizable": false,
+          "children": [
+            {
+              "id": "status",
+              "type": "block",
+              "content": {
+                "mod": "workspace-status"
+              }
+            },
+            {
+              "id": "spotify",
+              "type": "block",
+              "size": {
+                "px": 300
+              },
+              "content": {
+                "mod": "spotify-mini"
+              }
+            }
+          ]
         }
       ],
       "resizable": false
