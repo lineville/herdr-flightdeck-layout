@@ -8,7 +8,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome, notify } from "herdr";
+import { spaces, panes, agents, terminals, focused, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome, notify } from "herdr";
 
 // Worktree colors. Kept clear of status colors (green, orange, amber) and the deck's cyan.
 export const HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c4ff", "#e08cff", "#7fa7c9"];
@@ -683,7 +683,7 @@ export default class Spaces extends View {
     const item = { kind: "s", id: s.id, group: s.machine ?? "", index };
     return this.draggable(h_flex(), item, t, (d) => run("space.move", { id: d.id, index: index + 1 })).id(`space-${s.id}`).h(30).flex_none().pl(4).pr(6).gap(6).items_center().rounded(7)
       .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
-      .on_click(() => run("space.select", { id: s.id }))
+      .on_click(() => { this.picked = null; run("space.select", { id: s.id }); })
       .on_mouse_down("right", () => this.menu({ kind: "space", space: s.id }))
       .child(this.chevron(key, t))
       .child(this.mark(s, fill, 18, 10.5))
@@ -702,7 +702,34 @@ export default class Spaces extends View {
 
   // The one row that shows the selection: the focused agent when its row is visible, else
   // the shown tab's worktree, else the shown space (folded, or with no tab shown).
+  // A sub-agent row wins when its terminal has focus, or when it was the last row clicked
+  // and nothing else has been selected since (a peek doesn't move focus).
   litRow(trees) {
+    const base = this.baseLit(trees);
+    const shown = this.shownSubs(trees);
+    const f = focused();
+    const hit = [f?.terminal, f?.shown, f?.agent, ...this.ps.filter((p) => p.focused && p.terminal).map((p) => p.terminal)]
+      .find((x) => x && shown.has(x) && !this.listedTop.has(x));
+    if (hit) return `k:${hit}`;
+    if (this.picked && (!shown.has(this.picked.addr) || this.picked.base !== base)) this.picked = null;
+    return this.picked ? `k:${this.picked.addr}` : base;
+  }
+
+  // Addresses of the sub-agent rows the tree shows now.
+  shownSubs(trees) {
+    const out = new Set();
+    for (const { s, groups } of trees) {
+      if (this.folded.has(`s:${s.id}`)) continue;
+      for (const g of groups) {
+        if (g.done && !this.isOpen(`c:${s.id}`)) continue;
+        if (this.folded.has(`w:${s.id}:${g.path}`)) continue;
+        for (const a of g.agents) for (const { k } of this.kids(a.address)) out.add(k.address);
+      }
+    }
+    return out;
+  }
+
+  baseLit(trees) {
     const at = trees.find(({ s }) => s.active);
     if (!at) return null;
     const { s, groups } = at;
@@ -754,6 +781,7 @@ export default class Spaces extends View {
       .when(this.lit === key, (el) => el.bg(t.selected)).when(this.lit !== key, (el) => el.hover((st) => st.bg(t.hover)))
       .when(empty, (el) => el.tooltip("No terminals open. Click for a terminal here."))
       .on_click(() => {
+        this.picked = null;
         run("space.select", { id: s.id });
         if (empty) run("tab.new", { space: s.id, folder: g.path, name: g.branch });
         else run("tab.select", { id: g.tabs[0] });
@@ -777,14 +805,19 @@ export default class Spaces extends View {
       const quiet = a.status === "idle" && !a.focused;
       const head = h_flex().id(`ag-${a.address}`).h(24).flex_none().pl(40 + indent).pr(8).gap(7).items_center().rounded(7).text_size(12.5).cursor_pointer()
         .when(this.lit === `a:${a.address}`, (el) => el.bg(t.selected)).when(this.lit !== `a:${a.address}`, (el) => el.hover((st) => st.bg(t.hover)))
-        .on_click(() => run("pane.focus", { pane: a.pane }))
+        .on_click(() => { this.picked = null; run("pane.focus", { pane: a.pane }); })
         .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(pic)
         .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).child(agentLabel(a, cwdOf.get(a.pane))))
         .child(this.status(t, a.status));
       const subs = this.kids(a.address).map(({ k, depth }) => h_flex().id(`sub-${k.address}`).h(22).flex_none().pl(40 + indent + 12 * depth).pr(8).gap(7).items_center().rounded(7).text_size(12).cursor_pointer()
-        .hover((st) => st.bg(t.hover))
-        .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : run("terminal.peek", { terminal: k.address })))
+        .when(this.lit === `k:${k.address}`, (el) => el.bg(t.selected)).when(this.lit !== `k:${k.address}`, (el) => el.hover((st) => st.bg(t.hover)))
+        .on_click((_e, cx) => {
+          this.picked = { addr: k.address, base: this.base };
+          if (this.listed.has(k.address)) run("pane.focus", { terminal: k.address });
+          else run("terminal.peek", { terminal: k.address });
+          cx.notify();
+        })
         .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(div().flex_none().text_color(t.dim).child("\u2514"))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(k.name || k.template || k.program?.name || k.address))
@@ -827,6 +860,8 @@ export default class Spaces extends View {
       return { s, runs, done, groups: [...runs.flat(), ...done] };
     });
     this.keep(trees, kept);
+    this.listedTop = new Set(tops.map((a) => a.address));
+    this.base = this.baseLit(trees);
     this.lit = this.litRow(trees);
     this.open = trees.flatMap(({ s, groups }) => groups.map((g) => ({ s, g })));
     this.touch();
