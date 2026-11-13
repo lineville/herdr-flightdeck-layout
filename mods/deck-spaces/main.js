@@ -18,7 +18,7 @@ const SPACE_PALETTE = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const REFRESH_MS = 20000;
 const PR_REFRESH_MS = 60000;
-// Caffeinate: one detached `caffeinate -ims` whose pid lives in a file under the app
+// Caffeinate: one detached `caffeinate -dims` whose pid lives in a file under the app
 // folder, so it outlives mod reloads and the window. Checked every CAFFEINE_MS.
 const CAFFEINE_MS = 5000;
 const CAFFEINE_PID = "cache/deck-spaces/caffeinate.pid";
@@ -375,8 +375,9 @@ export default class Spaces extends View {
     });
   }
 
-  // Starts or stops caffeinate: -i idle sleep, -m disk sleep, -s system sleep (on AC
-  // power only). The display may still sleep. Lid-close sleep is not prevented.
+  // Starts or stops caffeinate: -d display sleep (without it the screen still goes dark
+  // and locks, which reads as sleep), -i idle sleep, -m disk sleep, -s system sleep (on AC
+  // power only). Lid-close sleep is not prevented.
   toggleCaffeine(cx) {
     if (this.caffeineBusy) return;
     const want = !this.caffeine;
@@ -385,7 +386,7 @@ export default class Spaces extends View {
     cx.notify();
     const file = `${appHome()}/${CAFFEINE_PID}`;
     const script = want
-      ? `${CAFFEINE_ALIVE} && exit 0; mkdir -p "$(dirname "$1")" || exit 1; nohup caffeinate -ims </dev/null >/dev/null 2>&1 & echo $! > "$1"`
+      ? `${CAFFEINE_ALIVE} && exit 0; mkdir -p "$(dirname "$1")" || exit 1; nohup caffeinate -dims </dev/null >/dev/null 2>&1 & echo $! > "$1"`
       : `${CAFFEINE_ALIVE} && kill "$p"; rm -f "$1"`;
     cx.spawn(async (cx) => {
       try { await exec("sh", ["-c", script, "sh", file]); } catch {}
