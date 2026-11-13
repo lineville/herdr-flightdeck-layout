@@ -205,27 +205,37 @@ function subStatus(k, listed) {
   return k.status === "error" ? "blocked" : k.status === "done" ? "idle" : listed.get(k.address) ?? k.status;
 }
 
-// A working agent's name: a soft highlight sweeps left to right through the text, then
-// rests. The name is drawn once in `base`, then twice more on top in `hi` (a faint glow
-// and the bright core) with native `frames`: each frame is the name with every character
-// outside the sweep blanked to a no-break space. That keeps alignment only because the UI
-// font is monospace. Every view shares one frame clock, and every name sweeps the same
-// SHIMMER_SPAN columns, so all working rows move in step. Render never reruns for it.
-const SHIMMER_MS = 90;
-const SHIMMER_SPAN = 24; // columns per sweep, whatever the name's length; later columns stay unlit
-const SHIMMER_GLOW = 3; // characters each side of the core that get the glow
-const SHIMMER_REST = 0; // extra frames of rest after the sweep leaves the span
-export function shimmer(text, base, hi) {
-  const chars = [...String(text)];
-  const lead = SHIMMER_GLOW + 1;
-  const period = SHIMMER_SPAN + lead * 2 + SHIMMER_REST;
-  const lit = (reach) => Array.from({ length: period }, (_, f) =>
-    chars.map((c, i) => (Math.abs(f - lead - i) <= reach && c !== " " ? c : "\u00a0")).join(""));
-  const layer = () => div().absolute().top(0).left(0).right(0).bottom(0).truncate().text_color(hi);
-  return div().relative().flex_1().min_w(0).text_color(base)
-    .child(div().truncate().child(chars.join("")))
-    .child(layer().opacity(0.4).frames(lit(SHIMMER_GLOW), SHIMMER_MS))
-    .child(layer().frames(lit(1), SHIMMER_MS));
+// A working agent's name shimmers: a soft band of `hi` glides left to right over the
+// name in `base`, like Cursor's and Claude's. The band is a stack of clip windows, each a
+// copy of the name in `hi` seen through a slot that moves with the band; the copy inside
+// is shifted back by the slot's offset, so its glyphs sit exactly on the base text and
+// the band cuts through letters smoothly instead of stepping a character at a time.
+// Wider slots are fainter, so the stack reads as a gradient. Positions are percentages of
+// the row, read from one wall clock, so every working row sweeps in step. Each row is a
+// small retained view (`Shimmer`) that the parent's ticker redraws every SHIMMER_FRAME_MS;
+// nothing else rerenders for it.
+const SHIMMER_CYCLE_MS = 2200; // one sweep plus the pause before the next
+const SHIMMER_SWEEP_MS = 1700; // the part of the cycle the band is moving
+const SHIMMER_FRAME_MS = 33; // ~30fps: about 8% of a core over idle; 16ms (60fps) cost about 26%
+// [slot width as % of the row, opacity]; stacked, the center is about 90% `hi`.
+const SHIMMER_BANDS = [[44, 0.14], [34, 0.18], [25, 0.24], [17, 0.3], [10, 0.38], [5, 0.45]];
+
+class Shimmer extends View {
+  init(props) { this.p = props ?? {}; }
+  update(props) { this.p = props ?? {}; }
+  render() {
+    const { text = "", base, hi } = this.p;
+    const t = (Date.now() % SHIMMER_CYCLE_MS) / SHIMMER_SWEEP_MS;
+    const out = SHIMMER_BANDS[0][0];
+    const root = div().relative().w_full().min_w(0).text_color(base).child(div().truncate().child(text));
+    if (t > 1) return root;
+    const center = -out / 2 + t * (100 + out); // % of the row; starts and ends fully off the text
+    return root.children(SHIMMER_BANDS.map(([w, o]) => {
+      const left = center - w / 2;
+      return div().absolute().top(0).bottom(0).left(`${left}%`).w(`${w}%`).overflow_hidden().opacity(o)
+        .child(div().absolute().top(0).bottom(0).left(`${(-left / w) * 100}%`).w(`${(100 / w) * 100}%`).truncate().text_color(hi).child(text));
+    }));
+  }
 }
 
 export function agentLabel(a, cwd) {
@@ -281,6 +291,9 @@ export default class Spaces extends View {
     this.caffeineBusy = false;
     cx.timer.every(1000, (cx) => this.refresh(cx));
     this.refresh(cx);
+    this.shimmers = new Map(); // row key -> { entity, props } for working names
+    this.shimmerWant = new Map(); // row key -> props, as the last render drew them
+    cx.timer.every(SHIMMER_FRAME_MS, (cx) => this.tickShimmer(cx));
     // `deck-spaces.caffeinate` toggles caffeinate, for a key in keys.json.
     cx.spawn(async (cx) => {
       for (;;) {
@@ -649,6 +662,35 @@ export default class Spaces extends View {
     return this.terms.filter((k) => k.parent === addr && k.state === "live").flatMap((k) => [{ k, depth }, ...this.kids(k.address, depth + 1)]);
   }
 
+  // A shimmering name for row `key`: its retained view once the ticker has made one, plain
+  // text in `base` until then (one frame). Entities can't be made during render.
+  shimmer(key, text, base, hi) {
+    const props = { text: String(text), base, hi };
+    this.shimmerWant.set(key, props);
+    const s = this.shimmers.get(key);
+    return div().flex_1().min_w(0).child(s ? s.entity : div().truncate().text_color(base).child(props.text));
+  }
+
+  // Makes, updates and releases the shimmer views the last render asked for, then redraws
+  // the live ones. Only the small views redraw; the tree redraws when one is first made.
+  tickShimmer(cx) {
+    let made = false;
+    for (const [key, s] of this.shimmers) {
+      if (!this.shimmerWant.has(key)) { s.entity.release(); this.shimmers.delete(key); }
+    }
+    for (const [key, props] of this.shimmerWant) {
+      const s = this.shimmers.get(key);
+      if (!s) { this.shimmers.set(key, { entity: cx.new(Shimmer, props), props }); made = true; }
+      else if (s.props.text !== props.text || s.props.base !== props.base || s.props.hi !== props.hi) { s.entity.set_props(props); s.props = props; }
+    }
+    if (made) cx.notify();
+    // In the pause between sweeps the band is off the text: draw that once, then rest.
+    const moving = Date.now() % SHIMMER_CYCLE_MS <= SHIMMER_SWEEP_MS + SHIMMER_FRAME_MS;
+    if (!moving && !this.shimmerMoved) return;
+    this.shimmerMoved = moving;
+    for (const s of this.shimmers.values()) cx.notify(s.entity);
+  }
+
   status(t, s, size = 12) {
     if (s === "working") return div().size(7).mx(3).flex_none().rounded(4).bg(t.working);
     if (s === "blocked") return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
@@ -897,7 +939,7 @@ export default class Spaces extends View {
         .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(pic)
         .child(a.status === "working"
-          ? shimmer(agentLabel(a, cwdOf.get(a.pane)), t.muted, t.foreground)
+          ? this.shimmer(`a:${a.address}`, agentLabel(a, cwdOf.get(a.pane)), t.dim, t.foreground)
           : div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).child(agentLabel(a, cwdOf.get(a.pane))))
         .child(this.status(t, a.status));
       const subs = this.kids(a.address).map(({ k, depth }) => h_flex().id(`sub-${k.address}`).h(22).flex_none().pl(40 + indent + 12 * depth).pr(8).gap(7).items_center().rounded(7).text_size(12).cursor_pointer()
@@ -911,7 +953,7 @@ export default class Spaces extends View {
         .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(div().flex_none().text_color(t.dim).child("\u2514"))
         .child(subStatus(k, this.listed) === "working"
-          ? shimmer(k.name || k.template || k.program?.name || k.address, t.dim, t.foreground)
+          ? this.shimmer(`k:${k.address}`, k.name || k.template || k.program?.name || k.address, t.dim, t.foreground)
           : div().flex_1().min_w(0).truncate().text_color(t.muted).child(k.name || k.template || k.program?.name || k.address))
         .child(this.status(t, subStatus(k, this.listed))));
       return [head.relative(), ...subs.map((r) => r.relative())];
@@ -931,6 +973,7 @@ export default class Spaces extends View {
   }
 
   render() {
+    this.shimmerWant = new Map();
     const t = theme();
     const sp = spaces();
     this.ps = panes();
