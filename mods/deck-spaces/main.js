@@ -8,7 +8,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, agents, terminals, focused, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome, notify } from "herdr";
+import { spaces, panes, agents, terminals, focused, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome, notify, nextCommand } from "herdr";
 
 // Worktree colors. Kept clear of status colors (green, orange, amber) and the deck's cyan.
 export const HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c4ff", "#e08cff", "#7fa7c9"];
@@ -18,6 +18,12 @@ const SPACE_PALETTE = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const REFRESH_MS = 20000;
 const PR_REFRESH_MS = 60000;
+// Caffeinate: one detached `caffeinate -ims` whose pid lives in a file under the app
+// folder, so it outlives mod reloads and the window. Checked every CAFFEINE_MS.
+const CAFFEINE_MS = 5000;
+const CAFFEINE_PID = "cache/deck-spaces/caffeinate.pid";
+// $1 is the pid file. Exits 0 when its pid is a live caffeinate.
+const CAFFEINE_ALIVE = 'p=$(cat "$1" 2>/dev/null) && [ -n "$p" ] && [ "$(ps -p "$p" -o comm= 2>/dev/null)" = caffeinate ]';
 const RAIL = 160;
 // Space avatars: the GitHub organization's logo for the space's `origin`, cached under the
 // app folder (where image() looks) and fetched again after a week. A personal account's
@@ -243,8 +249,18 @@ export default class Spaces extends View {
     this.sweeping = false;
     this.drag = null; // the row being dragged: { kind, id, group, index }
     this.over = null; // the row it would land on, "<kind>:<id>"
+    this.caffeine = false; // a caffeinate from this mod is running
+    this.caffeineAt = 0;
+    this.caffeineBusy = false;
     cx.timer.every(1000, (cx) => this.refresh(cx));
     this.refresh(cx);
+    // `deck-spaces.caffeinate` toggles caffeinate, for a key in keys.json.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "caffeinate" || c?.name === "caffeinate") this.toggleCaffeine(cx);
+      }
+    });
   }
 
   save() {
@@ -318,9 +334,53 @@ export default class Spaces extends View {
     });
   }
 
+  // Reads whether the caffeinate this mod started is still running (someone may kill it).
+  refreshCaffeine(cx, force = false) {
+    const now = Date.now();
+    if (this.caffeineBusy || !force && now - this.caffeineAt < CAFFEINE_MS) return;
+    this.caffeineAt = now;
+    this.caffeineBusy = true;
+    cx.spawn(async (cx) => {
+      let on = false;
+      try { on = (await exec("sh", ["-c", CAFFEINE_ALIVE, "sh", `${appHome()}/${CAFFEINE_PID}`])).code === 0; } catch {}
+      this.caffeineBusy = false;
+      if (on !== this.caffeine) { this.caffeine = on; cx.notify(); }
+    });
+  }
+
+  // Starts or stops caffeinate: -i idle sleep, -m disk sleep, -s system sleep (on AC
+  // power only). The display may still sleep. Lid-close sleep is not prevented.
+  toggleCaffeine(cx) {
+    if (this.caffeineBusy) return;
+    const want = !this.caffeine;
+    this.caffeine = want;
+    this.caffeineBusy = true;
+    cx.notify();
+    const file = `${appHome()}/${CAFFEINE_PID}`;
+    const script = want
+      ? `${CAFFEINE_ALIVE} && exit 0; mkdir -p "$(dirname "$1")" || exit 1; nohup caffeinate -ims </dev/null >/dev/null 2>&1 & echo $! > "$1"`
+      : `${CAFFEINE_ALIVE} && kill "$p"; rm -f "$1"`;
+    cx.spawn(async (cx) => {
+      try { await exec("sh", ["-c", script, "sh", file]); } catch {}
+      this.caffeineBusy = false;
+      this.refreshCaffeine(cx, true);
+    });
+  }
+
+  caffeineButton(t) {
+    const on = this.caffeine;
+    return div().id("caffeinate").size(24).flex_none().flex().items_center().justify_center().rounded(6)
+      .tooltip(on ? "Caffeinated: the Mac won't sleep while plugged in. Click to allow sleep." : "Caffeinate: keep the Mac awake so agents keep running")
+      .when(on, (el) => el.bg(t.selected).text_color(t.working))
+      .when(!on, (el) => el.hover((st) => st.bg(t.hover).text_color(t.foreground)))
+      .on_click((_e, cx) => this.toggleCaffeine(cx))
+      .child(svg("mods/deck-spaces/coffee.svg").size(14));
+  }
+
   // Reads each space's worktrees when it is new, when a pane sits outside every
   // known worktree (one was just made), or every REFRESH_MS while the window is in front.
   refresh(cx) {
+    this.refreshCaffeine(cx);
     this.refreshPrs(cx);
     this.sweep(cx);
     this.refreshAvatars(cx);
@@ -911,9 +971,11 @@ export default class Spaces extends View {
           .child("Spaces")
           .when(needs > 0, (el) => el.child(div().text_color(t.blocked).child(`${needs} need${needs === 1 ? "s" : ""} you`)))
           .when(busy > 0, (el) => el.child(div().text_color(t.working).child(`${busy} working`)))))
-        .child(div().id("space-new").size(24).flex_none().flex().items_center().justify_center().rounded(6).tooltip("Open a repo as a space")
-          .hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click(newSpace)
-          .child(svg("mods/workspace-chrome/folder-plus.svg").size(14))))
+        .child(h_flex().gap(2).items_center()
+          .when(!narrow, (el) => el.child(this.caffeineButton(t)))
+          .child(div().id("space-new").size(24).flex_none().flex().items_center().justify_center().rounded(6).tooltip("Open a repo as a space")
+            .hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click(newSpace)
+            .child(svg("mods/workspace-chrome/folder-plus.svg").size(14)))))
       .child(v_flex().id("tree").flex_1().min_h(0).px(narrow ? 0 : 6).pb(14).gap(1).overflow_y_scrollbar().children(body));
   }
 }
