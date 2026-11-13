@@ -201,6 +201,33 @@ function find(node, id) {
 
 // What an agent is called: Pi's session name ("π - <name> - <folder>"), else the
 // agent's own title, else its program.
+function subStatus(k, listed) {
+  return k.status === "error" ? "blocked" : k.status === "done" ? "idle" : listed.get(k.address) ?? k.status;
+}
+
+// A working agent's name: a soft highlight sweeps left to right through the text, then
+// rests. The name is drawn once in `base`, then twice more on top in `hi` (a faint glow
+// and the bright core) with native `frames`: each frame is the name with every character
+// outside the sweep blanked to a no-break space. That keeps alignment only because the UI
+// font is monospace. Every view shares one frame clock, and every name sweeps the same
+// SHIMMER_SPAN columns, so all working rows move in step. Render never reruns for it.
+const SHIMMER_MS = 90;
+const SHIMMER_SPAN = 32; // columns per sweep, whatever the name's length (a row shows about this many)
+const SHIMMER_GLOW = 3; // characters each side of the core that get the glow
+const SHIMMER_REST = 10; // frames of rest after the sweep leaves the text
+export function shimmer(text, base, hi) {
+  const chars = [...String(text)];
+  const lead = SHIMMER_GLOW + 1;
+  const period = SHIMMER_SPAN + lead * 2 + SHIMMER_REST;
+  const lit = (reach) => Array.from({ length: period }, (_, f) =>
+    chars.map((c, i) => (Math.abs(f - lead - i) <= reach && c !== " " ? c : "\u00a0")).join(""));
+  const layer = () => div().absolute().top(0).left(0).right(0).bottom(0).truncate().text_color(hi);
+  return div().relative().flex_1().min_w(0).text_color(base)
+    .child(div().truncate().child(chars.join("")))
+    .child(layer().opacity(0.4).frames(lit(SHIMMER_GLOW), SHIMMER_MS))
+    .child(layer().frames(lit(1), SHIMMER_MS));
+}
+
 export function agentLabel(a, cwd) {
   const title = (a.title ?? "").trim();
   const pi = /^π\s+-\s+(.*)$/.exec(title);
@@ -622,7 +649,7 @@ export default class Spaces extends View {
   }
 
   status(t, s, size = 12) {
-    if (s === "working") return svg("mods/workspace-chrome/spinner.svg").size(size).flex_none().text_color(t.working).spin(900);
+    if (s === "working") return div().size(7).mx(3).flex_none().rounded(4).bg(t.working);
     if (s === "blocked") return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (s === "done") return div().size(7).mx(3).flex_none().rounded(4).bg(t.done ?? t.dim);
     if (s === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
@@ -868,7 +895,9 @@ export default class Spaces extends View {
         .on_click(() => { this.picked = null; run("pane.focus", { pane: a.pane }); })
         .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(pic)
-        .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).child(agentLabel(a, cwdOf.get(a.pane))))
+        .child(a.status === "working"
+          ? shimmer(agentLabel(a, cwdOf.get(a.pane)), t.muted, t.foreground)
+          : div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).child(agentLabel(a, cwdOf.get(a.pane))))
         .child(this.status(t, a.status));
       const subs = this.kids(a.address).map(({ k, depth }) => h_flex().id(`sub-${k.address}`).h(22).flex_none().pl(40 + indent + 12 * depth).pr(8).gap(7).items_center().rounded(7).text_size(12).cursor_pointer()
         .when(this.lit === `k:${k.address}`, (el) => el.bg(t.selected)).when(this.lit !== `k:${k.address}`, (el) => el.hover((st) => st.bg(t.hover)))
@@ -880,8 +909,10 @@ export default class Spaces extends View {
         })
         .child(div().absolute().left(25 + indent).top(0).bottom(0).w(1).bg(color + "66"))
         .child(div().flex_none().text_color(t.dim).child("\u2514"))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(k.name || k.template || k.program?.name || k.address))
-        .child(this.status(t, k.status === "error" ? "blocked" : k.status === "done" ? "idle" : this.listed.get(k.address) ?? k.status)));
+        .child(subStatus(k, this.listed) === "working"
+          ? shimmer(k.name || k.template || k.program?.name || k.address, t.dim, t.foreground)
+          : div().flex_1().min_w(0).truncate().text_color(t.muted).child(k.name || k.template || k.program?.name || k.address))
+        .child(this.status(t, subStatus(k, this.listed))));
       return [head.relative(), ...subs.map((r) => r.relative())];
     });
   }
