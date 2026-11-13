@@ -212,9 +212,9 @@ function subStatus(k, listed) {
 // font is monospace. Every view shares one frame clock, and every name sweeps the same
 // SHIMMER_SPAN columns, so all working rows move in step. Render never reruns for it.
 const SHIMMER_MS = 90;
-const SHIMMER_SPAN = 32; // columns per sweep, whatever the name's length (a row shows about this many)
+const SHIMMER_SPAN = 24; // columns per sweep, whatever the name's length; later columns stay unlit
 const SHIMMER_GLOW = 3; // characters each side of the core that get the glow
-const SHIMMER_REST = 10; // frames of rest after the sweep leaves the text
+const SHIMMER_REST = 0; // extra frames of rest after the sweep leaves the span
 export function shimmer(text, base, hi) {
   const chars = [...String(text)];
   const lead = SHIMMER_GLOW + 1;
