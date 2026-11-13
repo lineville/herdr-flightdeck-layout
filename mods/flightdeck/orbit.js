@@ -42,8 +42,43 @@ export const startAngle = (slot) => (slot * GOLDEN) % TAU;
 
 export const orbitOf = (slot, r) => ({ r, ...shapeOf(slot), period: periodFor(r) });
 
-// A sub-agent's small orbit around its parent craft.
-export const moonOrbitOf = (slot) => ({ r: 0.36 + 0.1 * (slot % 3), inc: deg(35 - 20 * (slot % 4)), node: deg(70 * slot), period: 5200 + 900 * (slot % 3) });
+// A sub-agent's orbit around its parent craft: four radii (0.6 to 1.14 planet radii), each
+// slot with its own tilt and line of nodes, tipped open like the main orbits so none reads
+// as a line. Outer moons are slower (Kepler), 7s to about 12.5s a turn.
+const MOON_R = 0.6;
+const MOON_STEP = 0.18;
+const MOON_INCL = [28, -18, 40, -8, 22, -34];
+export const moonOrbitOf = (slot) => {
+  const r = MOON_R + MOON_STEP * (slot % 4);
+  const node = deg(53 * slot);
+  let inc = deg(MOON_INCL[slot % MOON_INCL.length]);
+  if (Math.abs(openness(inc, node)) < MIN_OPEN) inc = -inc;
+  return { r, inc, node, period: 7000 * Math.pow(r / MOON_R, 1.5) };
+};
+
+// A moon's orbit drawn around its parent at `center` (world), as polylines in px relative to
+// the box { x, y, w, h } they fit in, split by whether each point is nearer the camera than
+// the parent. The box is in screen px, so the ring can glide with its parent.
+export function moonRing(cam, center, o, steps = 72) {
+  const c = project(cam, center);
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const q = project(cam, add(center, orbitPoint(o, (i / steps) * TAU)));
+    pts.push({ x: q.x, y: q.y, near: q.scale >= c.scale });
+  }
+  const pad = 2;
+  const x0 = Math.min(...pts.map((p) => p.x)) - pad, y0 = Math.min(...pts.map((p) => p.y)) - pad;
+  const x1 = Math.max(...pts.map((p) => p.x)) + pad, y1 = Math.max(...pts.map((p) => p.y)) + pad;
+  const far = [], near = [];
+  let run = null, side = null;
+  for (const p of pts) {
+    const s = p.near ? "near" : "far";
+    const xy = [p.x - x0, p.y - y0];
+    if (s !== side) { if (run) run.push(xy); run = []; (s === "far" ? far : near).push(run); side = s; }
+    run.push(xy);
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, far, near };
+}
 
 // Pushes radii apart so each pair keeps MIN_GAP between them. `wanted` is [{key, r}];
 // returns a Map key -> r. Craft keep their order, and the set shifts in when it would pass the limit.
@@ -69,7 +104,7 @@ export const padPoint = (slot) => {
   return scale([Math.cos(lat) * Math.sin(lon), Math.sin(lat), Math.cos(lat) * Math.cos(lon)], PAD_R);
 };
 
-// A sub-agent docks beside its parent.
+// Where a sub-agent launches from and lands, beside its parent. A landed sub-agent isn't drawn.
 export const moonPadPoint = (slot) => {
   const a = deg(200 + 55 * slot);
   return [0.2 * Math.cos(a), -0.14, 0.2 * Math.sin(a)];

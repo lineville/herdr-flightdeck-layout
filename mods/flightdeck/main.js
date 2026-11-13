@@ -12,7 +12,7 @@ import { agents, focused, hc, props, run, settings, shared, spaces, terminals, p
 import { createDemo } from "./demo.js";
 import {
   DEFAULT_VIEW, LAND_MS, LAUNCH_MS, PITCH_MAX, PITCH_MIN, R_RATE, TAU, ZOOM_MAX, ZOOM_MIN, add, ascent, camera, clamp01,
-  descent, moonOrbitOf, moonPadPoint, orbitOf, orbitPaths, orbitPoint, padPoint, project, radiusFor, spreadRadii, startAngle,
+  descent, moonOrbitOf, moonPadPoint, moonRing, orbitOf, orbitPaths, orbitPoint, padPoint, project, radiusFor, spreadRadii, startAngle,
 } from "./orbit.js";
 import { modelLook, parseStatusLine } from "./telemetry.js";
 
@@ -62,6 +62,11 @@ const ORBIT_GRAY = C.fg2; // orbits stay neutral so they don't compete with the 
 const ORBIT_NEAR_ALPHA = "8c"; // 55%
 const ORBIT_FAR_ALPHA = "4d"; // 30%
 const ORBIT_DOTS = [1.5, 5];
+// A sub-agent's orbit ring rides along with its parent: a little brighter than the big
+// orbits on its near side so a crew reads as moons on tracks, not a loose cluster.
+const MOON_NEAR_ALPHA = "80"; // 50%
+const MOON_FAR_ALPHA = "33"; // 20%
+const MOON_DOTS = [1.5, 4];
 // Only craft in flight draw their orbit; descending, landed and docked craft don't.
 const IN_FLIGHT = new Set(["launch", "orbit", "hold"]);
 
@@ -353,6 +358,8 @@ export default class FlightDeck extends View {
     for (const c of this.craft.values()) {
       if (!ids.has(c.space)) continue;
       if (c.phase === "launch" || c.phase === "land") return this.fastMs;
+      // Moons turn in seconds, so they tick fast too; at the slow tick they cut corners.
+      if (c.phase === "orbit" && c.parent) return this.fastMs;
       if (c.phase === "orbit") orbiting = true;
     }
     return orbiting ? this.slowMs : 0;
@@ -393,6 +400,17 @@ export default class FlightDeck extends View {
       const off = Math.hypot(q.x - cam.cx, q.y - cam.cy);
       const hidden = q.behind && off < cam.planetPx + s * 0.2;
       this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: hidden ? 0 : q.behind ? 0.55 : 1 });
+    }
+    // Rings for moons in flight, around where their parent will be at `t`.
+    this.moonRings = [];
+    for (const c of this.craft.values()) {
+      const p = c.parent && this.craft.get(c.parent);
+      const cam = this.cams.get(c.space);
+      if (!p || !cam || (c.phase !== "orbit" && c.phase !== "hold")) continue;
+      const pf = this.frame.get(p.address);
+      if (!pf || pf.opacity === 0) continue;
+      const ring = moonRing(cam, this.worldAt(p, p.shown ? t : this.now), this.orbit(c));
+      this.moonRings.push({ key: c.address, opacity: pf.opacity, ...ring });
     }
   }
 
@@ -571,6 +589,18 @@ export default class FlightDeck extends View {
     const layer = (path, color) => (path ? window.paint_path(path, color).absolute().left(0).top(0).w(vp.w).h(vp.h) : null);
     const farRings = this.orbitCache.rings.flatMap((r) => r.far.map((p) => layer(p, r.farColor)));
     const nearRings = this.orbitCache.rings.flatMap((r) => r.near.map((p) => layer(p, r.nearColor)));
+    const moonDur = { duration: this.dur, easing: "linear" };
+    const moonPath = (run) => {
+      let path = PathBuilder.stroke(1.2).dash_array(MOON_DOTS).move_to(run[0][0], run[0][1]);
+      for (const pt of run.slice(1)) path = path.line_to(pt[0], pt[1]);
+      return path.build();
+    };
+    const moonRings = (this.moonRings ?? []).map((m) => div().id(`moon-ring-${m.key}`).absolute()
+      .left(m.x).top(m.y).w(m.w).h(m.h).opacity(m.opacity)
+      .transition("left", moonDur).transition("top", moonDur).transition("opacity", moonDur)
+      .children([...m.far.map((r) => [r, `${ORBIT_GRAY}${MOON_FAR_ALPHA}`]), ...m.near.map((r) => [r, `${ORBIT_GRAY}${MOON_NEAR_ALPHA}`])]
+        .filter(([r]) => r.length > 1)
+        .map(([r, color]) => window.paint_path(moonPath(r), color).absolute().left(0).top(0).w(m.w).h(m.h))));
     const starSide = Math.max(vp.w, vp.h);
     const bodies = this.rows.filter((r) => r.kind === "agent").map((r) => this.body(r.a, tabs)).filter(Boolean);
     const moved = Math.abs(yaw - DEFAULT_VIEW.yaw) > 1e-3 || Math.abs(pitch - DEFAULT_VIEW.pitch) > 1e-3 || Math.abs(zoom - DEFAULT_VIEW.zoom) > 1e-3;
@@ -609,6 +639,7 @@ export default class FlightDeck extends View {
       .children(farRings)
       .children(this.cells.flatMap((cell) => this.planet(cell, list)))
       .children(nearRings)
+      .children(moonRings)
       .children(bodies)
       .child(this.readout(vp, shown, list))
       .child(this.viewControls(vp, moved))
@@ -743,6 +774,9 @@ export default class FlightDeck extends View {
     const c = this.craft.get(a.address);
     const f = c && this.frame.get(a.address);
     if (!f || !this.cams.has(c.space)) return null;
+    // A sub-agent shows only while it flies: once it has landed it leaves the view (the
+    // manifest still lists it). Full agents keep their docked marker on the planet.
+    if (c.parent && c.phase === "parked") { c.shown = false; return null; }
     c.shown = true;
     const dur = { duration: this.dur, easing: "linear" };
     const box = f.s + 10;
