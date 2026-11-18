@@ -875,7 +875,16 @@ export default class Spaces extends View {
     const g = groups.find((g) => s.tabs.some((x) => x.active && g.tabs.includes(x.id)));
     if (!g) return `s:${s.id}`;
     if (g.done && !this.isOpen(`c:${s.id}`)) return `c:${s.id}`;
-    const a = !this.folded.has(`w:${s.id}:${g.path}`) && g.agents.find((a) => a.focused);
+    const open = !this.folded.has(`w:${s.id}:${g.path}`);
+    let a = open && g.agents.find((a) => a.focused);
+    // A herdr-chat tab: the chat (a mod pane) has the focus and Pi runs in a hidden pane of the
+    // same tab. Light that tab's agent when it is the only one there.
+    if (open && !a) {
+      const tab = s.tabs.find((x) => x.active)?.id;
+      const fp = this.ps.find((p) => p.tab === tab && p.focused);
+      const inTab = g.agents.filter((x) => x.tab === tab);
+      if (fp && !fp.terminal && inTab.length === 1) a = inTab[0];
+    }
     return a ? `a:${a.address}` : `w:${s.id}:${g.path}`;
   }
 
