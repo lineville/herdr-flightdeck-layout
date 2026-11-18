@@ -947,6 +947,8 @@ export default class Spaces extends View {
         .on_click((_e, cx) => {
           this.picked = { addr: k.address, base: this.base };
           if (this.listed.has(k.address)) run("pane.focus", { terminal: k.address });
+          else if (k.labels?.["herdr-chat.chat"]) openOverlay({ mod: "chat", kind: "dialog", width: 0.8, height: 0.8,
+            props: { chat: k.labels["herdr-chat.chat"], peek: k.address, ...(k.labels["herdr-chat.provider"] ? { provider: k.labels["herdr-chat.provider"] } : {}) } });
           else run("terminal.peek", { terminal: k.address });
           cx.notify();
         })

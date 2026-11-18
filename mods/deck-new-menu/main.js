@@ -1,6 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, spaces, panes, knownAgents, run, openOverlay, closeOverlay, props, window, keys, shared, setShared } from "herdr";
+import { theme, spaces, panes, focused, knownAgents, run, openOverlay, closeOverlay, props, window, keys, shared, setShared } from "herdr";
+import { randomBytes } from "crypto";
 
 // The last agents each machine reported, shown at once while knownAgents() checks again.
 const KNOWN = "new-menu.agents";
@@ -20,6 +21,20 @@ function shortcut(name) {
     const label = key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1).toLowerCase();
     return [...Object.keys(names).filter(m => held.has(m)).map(m => names[m]), label].join(mac ? "" : "+");
   }).join(" ");
+}
+
+// Agents herdr-chat can draw. Their rows open a chat tab; Option-click starts the terminal UI.
+const CHAT = new Set(["pi", "claude", "codex"]);
+
+function startAgent(agent, space, tui = false) {
+  if (tui || !CHAT.has(agent.key) || space?.machine) {
+    run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
+    return;
+  }
+  const f = focused();
+  const cwd = (f?.space === space?.id && f?.cwd) || space?.folder || null;
+  const chat = `c-${randomBytes(4).toString("hex")}`;
+  run("tab.new", { name: agent.name, space: space?.id, mod: "chat", props: { chat, provider: agent.key, ...(cwd ? { cwd } : {}) } });
 }
 
 export default class NewMenu extends View {
@@ -42,7 +57,7 @@ export default class NewMenu extends View {
     const t = theme();
     return h_flex().id(id).h(31).px(9).gap(10).rounded(7).items_center().flex_none()
       .text_color(enabled ? t.foreground : t.dim).when(enabled, el => el.hover(s => s.bg(t.selected)))
-      .on_click(() => { if (enabled) { closeOverlay(props().overlay); action(); } })
+      .on_click((e) => { if (enabled) { closeOverlay(props().overlay); action(e); } })
       .child(icon).child(div().flex_1().child(name)).child(div().text_size(11).text_color(t.dim).child(hint));
   }
   render() {
@@ -57,13 +72,13 @@ export default class NewMenu extends View {
         const agent = /^[1-9]$/.test(e.key) ? installed[Number(e.key) - 1] : null;
         if (!agent) return;
         closeOverlay(props().overlay);
-        run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
+        startAgent(agent, space);
       })
       .child(this.row("terminal", svg("icons/shell.svg").size(14), "Terminal", () => run("tab.new", { space: space?.id }), shortcut("tab.new")))
-      .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
+      .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent \u00b7 \u2325-click for terminal UI"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .children(choices.map((a, i) => this.row(a.key, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? String(i + 1) : "") : "not installed", a.installed)))
+          (e) => startAgent(a, space, Boolean(e?.modifiers?.alt)), a.installed ? (i < 9 ? String(i + 1) : "") : "not installed", a.installed)))
         .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
       .child(div().h(1).mx(4).my(5).bg(t.border))
       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), shortcut("space.new")))

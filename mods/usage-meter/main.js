@@ -1,9 +1,9 @@
 // Quiet usage meters for the Flight Deck status bar: Claude Code and Codex, one
 // chip per limit window (Claude: 5h and wk; Codex: wk), each a tag, a thin bar
 // and its percent. A faint tick on the bar marks how much of the window has
-// elapsed: a fill past it is using the limit faster than it resets. Hover a chip
-// for its reset time and pace (Claude's wk chip and name add per-model limits,
-// Fable today); click anything to refresh.
+// elapsed: a fill past it is using the limit faster than it resets. Hover for
+// every window's percent, plus per-model limits (Fable today); click
+// anything to refresh.
 // fetch.py reads the CLIs' own tokens and calls their usage endpoints.
 
 import { View, div } from "gpui-kit";
@@ -20,13 +20,6 @@ const DEMO = {
 };
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-
-const until = (epoch) => {
-  if (!epoch) return "";
-  const s = Math.max(0, epoch - Date.now() / 1000);
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
-};
 
 export default class UsageMeter extends View {
   init(_props, cx) {
@@ -64,17 +57,8 @@ export default class UsageMeter extends View {
     return clamp(1 - (w.resets - Date.now() / 1000) / w.length, 0, 1);
   }
 
-  describe(name, w) {
-    const pace = this.elapsed(w);
-    const ahead = pace != null && w.percent / 100 > pace + 0.02;
-    const parts = [`${name} ${w.label}: ${Math.round(w.percent)}% used`];
-    if (w.resets) parts.push(`resets in ${until(w.resets)}`);
-    if (pace != null) parts.push(ahead ? `ahead of pace (${Math.round(pace * 100)}% of window elapsed)` : `within pace (${Math.round(pace * 100)}% of window elapsed)`);
-    return parts.join(" · ");
-  }
-
   // One window: a short tag (5h, wk), a thin bar with a pace tick, and its percent.
-  chip(id, name, w, tip, t) {
+  chip(id, w, tip, t) {
     const pct = clamp(w.percent, 0, 100);
     const pace = this.elapsed(w);
     const hot = w.percent >= 75 || (pace != null && w.percent / 100 > pace + 0.02);
@@ -94,22 +78,19 @@ export default class UsageMeter extends View {
 
   meter(id, name, info, t) {
     const windows = info?.windows ?? [];
-    const extras = (info?.extras ?? []).map((x) => `${x.label} ${Math.round(x.percent)}%${x.resets ? ` (resets in ${until(x.resets)})` : ""}`);
-    const summary = info?.error
+    const label = (l) => (l === "week" ? "Weekly" : l.replace(/ week$/, ""));
+    const tip = info?.error
       ? `${name}: ${info.error}`
       : windows.length
-        ? [...windows.map((w) => `${w.label} ${Math.round(w.percent)}%`), ...extras].join(" · ")
-        : `${name}: loading`;
-    const head = div().id(`${id}-name`).px(4).text_color(t.dim).tooltip(windows.length ? `${name} · ${summary}` : summary)
+        ? [...windows, ...(info?.extras ?? [])].map((w) => `${label(w.label)} ${Math.round(w.percent)}%`).join(" · ")
+        : "Loading";
+    const head = div().id(`${id}-name`).px(4).text_color(t.dim).tooltip(tip)
       .cursor_pointer().on_click((_e, cx) => this.refresh(cx)).child(name);
-    const row = h_flex().items_center().gap(0).child(head);
+    const row = h_flex().items_center().child(head);
     if (info?.error || !windows.length) {
-      return row.child(div().px(4).text_color(t.dim).tooltip(summary).child(info?.error ? "–" : "…"));
+      return row.child(div().px(4).text_color(t.dim).tooltip(tip).child(info?.error ? "–" : "…"));
     }
-    return row.children(windows.map((w, i) => {
-      const extra = w.label === "week" && extras.length ? ` · ${extras.join(" · ")}` : "";
-      return this.chip(`${id}-${i}`, name, w, this.describe(name, w) + extra, t);
-    }));
+    return row.children(windows.map((w, i) => this.chip(`${id}-${i}`, w, tip, t)));
   }
 
   render() {
