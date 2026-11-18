@@ -3,6 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
+import { randomBytes } from "crypto";
 import { run, props, closeOverlay, theme, spaces, panes, exec, home, shared, setShared } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -195,9 +196,11 @@ export default class Worktree extends View {
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
     const s = spaces().find((x) => x.id === p.space);
-    // A worktree is a tab in its repo's space, running Pi unless told otherwise.
-    if (s) run("tab.new", { space: s.id, folder: path, name: p.tab ?? branch, argv: p.argv ?? ["pi"] });
-    else run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab ?? branch, argv: p.argv ?? ["pi"] });
+    // A worktree is a tab in its repo's space, running Pi unless told otherwise: a herdr-chat chat
+    // on this Mac, the terminal UI on another machine or for a new space (space.new takes no mod).
+    if (s && !p.argv && !s.machine) run("tab.new", { space: s.id, name: p.tab ?? branch, mod: "chat", props: { chat: `c-${randomBytes(4).toString("hex")}`, provider: "pi", cwd: path } });
+    else if (s) run("tab.new", { space: s.id, folder: path, name: p.tab ?? branch, argv: p.argv ?? ["env", "PI_TUI=1", "pi"] });
+    else run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab ?? branch, argv: p.argv ?? ["env", "PI_TUI=1", "pi"] });
     return "";
   }
 

@@ -28,7 +28,8 @@ const CHAT = new Set(["pi", "claude", "codex"]);
 
 function startAgent(agent, space, tui = false) {
   if (tui || !CHAT.has(agent.key) || space?.machine) {
-    run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
+    // PI_TUI=1: the shell's `pi` function (herdr-pi-chat.zsh) would otherwise open a chat.
+    run("tab.new", { name: agent.name, space: space?.id, argv: agent.key === "pi" ? ["env", "PI_TUI=1", ...agent.run] : agent.run });
     return;
   }
   const f = focused();

@@ -5,6 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
+import { randomBytes } from "crypto";
 import { run, props, closeOverlay, openOverlay, theme, spaces, panes, exec, shared, setShared } from "herdr";
 
 const dialog = (p, big) => openOverlay({ mod: "deck-worktree", kind: "dialog", width: big ? 560 : 460, height: big ? 480 : 280, props: p });
@@ -37,7 +38,10 @@ function items(p) {
   return [
     ...(p.pr?.url ? [{ label: `Open PR #${p.pr.number}`, icon: icon("mods/deck-menu/github.svg", "foreground"), run: open(p.pr.url) }] : []),
     ...(p.ticket?.url ? [{ label: `Open ${p.ticket.id} in Linear`, icon: icon("mods/deck-menu/linear.svg", "foreground"), run: open(p.ticket.url) }] : []),
-    { label: "Open Pi agent", icon: icon("icons/pi.svg", "foreground"), run: () => run("tab.new", { space: p.space, folder: p.path, name: p.branch, argv: ["pi"] }) },
+    { label: "Open Pi chat", icon: icon("icons/pi.svg", "foreground"), run: () => s?.machine
+      ? run("tab.new", { space: p.space, folder: p.path, name: p.branch, argv: ["env", "PI_TUI=1", "pi"] })
+      : run("tab.new", { space: p.space, name: p.branch, mod: "chat", props: { chat: `c-${randomBytes(4).toString("hex")}`, provider: "pi", cwd: p.path } }) },
+    { label: "Open Pi terminal UI", icon: icon("icons/pi.svg", "foreground"), run: () => run("tab.new", { space: p.space, folder: p.path, name: p.branch, argv: ["env", "PI_TUI=1", "pi"] }) },
     { label: "New terminal", icon: icon("terminal"), run: () => run("tab.new", { space: p.space, folder: p.path, name: p.branch }) },
     ...(mine.length ? [{ label: "Close its tabs", icon: icon("x"), run: () => mine.forEach((t) => run("tab.close", { id: t.id, confirmed: true })) }] : []),
     ...(p.empty ? [{ label: "Hide from sidebar", icon: icon("x"), run: hide(p.space, p.path) }] : []),

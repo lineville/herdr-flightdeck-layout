@@ -8,11 +8,19 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
+import { randomBytes } from "crypto";
 import { spaces, panes, agents, terminals, focused, setAgentOrder, run, openOverlay, exec, theme, shared, setShared, layout, window, pickFolder, appHome, notify, nextCommand } from "herdr";
 
 // Worktree colors. Kept clear of status colors (green, orange, amber) and the deck's cyan.
 export const HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c4ff", "#e08cff", "#7fa7c9"];
 // Space avatar colors, by stored name.
+// Pi in a worktree: a herdr-chat chat tab, or the terminal UI with `tui` (Option-click) or on another
+// machine (herdr-chat runs on this Mac only). PI_TUI=1 tells the shell's `pi` function to stay a TUI.
+function newPi(s, folder, name, tui) {
+  if (tui || s.machine) return run("tab.new", { space: s.id, folder, name, argv: ["env", "PI_TUI=1", "pi"] });
+  run("tab.new", { space: s.id, name, mod: "chat", props: { chat: `c-${randomBytes(4).toString("hex")}`, provider: "pi", cwd: folder } });
+}
+
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 const SPACE_PALETTE = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
@@ -710,7 +718,7 @@ export default class Spaces extends View {
   plus(id, tip, t, action) {
     return div().id(id).size(18).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.dim)
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
-      .on_click((_e, cx) => { cx.stop_propagation(); action(); })
+      .on_click((e, cx) => { cx.stop_propagation(); action(e); })
       .child(svg("mods/workspace-chrome/plus.svg").size(11));
   }
 
@@ -758,7 +766,7 @@ export default class Spaces extends View {
       return ps.length && ps.every((x) => x.cwd && inside(x.cwd, g.path));
     });
     const empty = g.panes.length === 0;
-    const count = 2 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0);
+    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0);
     this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, empty, pr, ticket }, 36 + count * 30);
   }
 
@@ -924,7 +932,7 @@ export default class Spaces extends View {
       .when(folded && g.agents.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(g.agents.length))))
       .when(folded && worst && worst !== "idle", (el) => el.child(this.status(t, worst)))
       .when(Boolean(badge), (el) => el.child(badge))
-      .child(this.plus(`ag-new-${s.id}-${g.path}`, "New Pi agent here", t, () => run("tab.new", { space: s.id, folder: g.path, name: g.branch, argv: ["pi"] })));
+      .child(this.plus(`ag-new-${s.id}-${g.path}`, "New Pi chat here (\u2325-click: terminal UI)", t, (e) => newPi(s, g.path, g.branch, Boolean(e?.modifiers?.alt))));
   }
 
   agentRows(g, color, t, indent = 0) {
