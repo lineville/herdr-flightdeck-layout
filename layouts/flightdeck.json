@@ -164,19 +164,15 @@
         {
           "id": "status-row",
           "type": "row",
-          "size": {
-            "px": 28
-          },
-          "resizable": false,
           "children": [
             {
               "id": "spotify",
               "type": "block",
-              "size": {
-                "px": 440
-              },
               "content": {
                 "mod": "spotify-mini"
+              },
+              "size": {
+                "px": 440
               }
             },
             {
@@ -185,8 +181,22 @@
               "content": {
                 "mod": "workspace-status"
               }
+            },
+            {
+              "id": "usage",
+              "type": "block",
+              "content": {
+                "mod": "usage-meter"
+              },
+              "size": {
+                "px": 280
+              }
             }
-          ]
+          ],
+          "size": {
+            "px": 28
+          },
+          "resizable": false
         }
       ],
       "resizable": false
