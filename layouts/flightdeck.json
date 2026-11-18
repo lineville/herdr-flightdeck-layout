@@ -216,5 +216,19 @@
     12,
     16
   ],
-  "preview": "layouts/flightdeck.svg"
+  "preview": "layouts/flightdeck.svg",
+  "terminal_menu": "chat-menu",
+  "floating": [
+    {
+      "id": "new-chat-commands",
+      "edge": "bottom",
+      "align": "start",
+      "content": {
+        "mod": "new-chat",
+        "props": {
+          "role": "commands"
+        }
+      }
+    }
+  ]
 }
