@@ -34,7 +34,7 @@ function startAgent(agent, space, tui = false) {
   const f = focused();
   const cwd = (f?.space === space?.id && f?.cwd) || space?.folder || null;
   const chat = `c-${randomBytes(4).toString("hex")}`;
-  run("tab.new", { name: agent.name, space: space?.id, mod: "chat", props: { chat, provider: agent.key, ...(cwd ? { cwd } : {}) } });
+  run("tab.new", { name: agent.key, space: space?.id, mod: "chat", props: { chat, provider: agent.key, ...(cwd ? { cwd } : {}) } });
 }
 
 export default class NewMenu extends View {
