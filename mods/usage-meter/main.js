@@ -1,6 +1,9 @@
-// Two quiet usage meters for the Flight Deck status bar: Claude Code and Codex,
-// each with a thin bar per limit window (Claude: 5h and week; Codex: week) and
-// the highest percent. Hover for the windows and reset times; click to refresh.
+// Quiet usage meters for the Flight Deck status bar: Claude Code and Codex, one
+// chip per limit window (Claude: 5h and wk; Codex: wk), each a tag, a thin bar
+// and its percent. A faint tick on the bar marks how much of the window has
+// elapsed: a fill past it is using the limit faster than it resets. Hover a chip
+// for its reset time and pace (Claude's wk chip and name add per-model limits,
+// Fable today); click anything to refresh.
 // fetch.py reads the CLIs' own tokens and calls their usage endpoints.
 
 import { View, div } from "gpui-kit";
@@ -9,7 +12,10 @@ import { exec, props, theme, appHome, checking } from "herdr";
 
 const POLL_MS = 3 * 60 * 1000;
 const DEMO = {
-  claude: { windows: [{ label: "5h", percent: 42, resets: null }, { label: "week", percent: 18, resets: null }] },
+  claude: {
+    windows: [{ label: "5h", percent: 42, resets: null }, { label: "week", percent: 18, resets: null }],
+    extras: [{ label: "Fable week", percent: 11, resets: null }],
+  },
   codex: { windows: [{ label: "week", percent: 7, resets: null }] },
 };
 
@@ -52,27 +58,58 @@ export default class UsageMeter extends View {
     return pct >= 90 ? t.blocked : pct >= 75 ? t.ansi3 : t.accent;
   }
 
-  meter(id, name, info, t) {
-    const windows = info?.windows ?? [];
-    const top = windows.length ? Math.max(...windows.map((w) => w.percent)) : null;
-    const tip = info?.error
-      ? `${name}: ${info.error}`
-      : windows.length
-        ? `${name} · ${windows.map((w) => `${w.label} ${Math.round(w.percent)}%${w.resets ? ` (resets in ${until(w.resets)})` : ""}`).join(" · ")}`
-        : `${name}: loading`;
-    const bars = v_flex().w(40).flex_none().gap(2).justify_center()
-      .children((windows.length ? windows : [{ percent: 0 }]).map((w) =>
-        div().w_full().h(3).rounded(2).bg(t.raised).flex()
-          .child(div().h(3).rounded(2).bg(this.color(w.percent, t)).flex_basis(`${clamp(w.percent, 0, 100)}%`))));
-    return h_flex().id(id).h(22).px(6).gap(6).items_center().rounded(4).cursor_pointer()
+  // How far into the window we are, 0..1, or null when the window's length or reset is unknown.
+  elapsed(w) {
+    if (!w.length || !w.resets) return null;
+    return clamp(1 - (w.resets - Date.now() / 1000) / w.length, 0, 1);
+  }
+
+  describe(name, w) {
+    const pace = this.elapsed(w);
+    const ahead = pace != null && w.percent / 100 > pace + 0.02;
+    const parts = [`${name} ${w.label}: ${Math.round(w.percent)}% used`];
+    if (w.resets) parts.push(`resets in ${until(w.resets)}`);
+    if (pace != null) parts.push(ahead ? `ahead of pace (${Math.round(pace * 100)}% of window elapsed)` : `within pace (${Math.round(pace * 100)}% of window elapsed)`);
+    return parts.join(" · ");
+  }
+
+  // One window: a short tag (5h, wk), a thin bar with a pace tick, and its percent.
+  chip(id, name, w, tip, t) {
+    const pct = clamp(w.percent, 0, 100);
+    const pace = this.elapsed(w);
+    const hot = w.percent >= 75 || (pace != null && w.percent / 100 > pace + 0.02);
+    const bar = div().relative().w(30).h(4).flex_none().rounded(2).bg(t.raised).flex()
+      .child(div().h(4).rounded(2).bg(this.color(w.percent, t)).flex_basis(`${pct}%`))
+      .when(pace != null, (el) => el.child(
+        div().absolute().top(-2).h(8).w(1).bg(t.foreground).opacity(0.55).left(`${Math.round(pace * 1000) / 10}%`)));
+    return h_flex().id(id).h(22).px(5).gap(5).items_center().rounded(4).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .tooltip(tip)
       .on_click((_e, cx) => this.refresh(cx))
-      .child(div().text_color(t.dim).child(name))
-      .child(bars)
-      .child(div().w(28).flex_none().text_right()
-        .text_color(info?.error ? t.dim : top == null ? t.dim : top >= 75 ? this.color(top, t) : t.muted)
-        .child(info?.error ? "–" : top == null ? "…" : `${Math.round(top)}%`));
+      .child(div().text_size(10).text_color(t.dim).child(w.label === "week" ? "wk" : w.label))
+      .child(bar)
+      .child(div().min_w(24).text_right().text_color(w.percent >= 75 ? this.color(w.percent, t) : hot ? t.foreground : t.muted)
+        .child(`${Math.round(w.percent)}%`));
+  }
+
+  meter(id, name, info, t) {
+    const windows = info?.windows ?? [];
+    const extras = (info?.extras ?? []).map((x) => `${x.label} ${Math.round(x.percent)}%${x.resets ? ` (resets in ${until(x.resets)})` : ""}`);
+    const summary = info?.error
+      ? `${name}: ${info.error}`
+      : windows.length
+        ? [...windows.map((w) => `${w.label} ${Math.round(w.percent)}%`), ...extras].join(" · ")
+        : `${name}: loading`;
+    const head = div().id(`${id}-name`).px(4).text_color(t.dim).tooltip(windows.length ? `${name} · ${summary}` : summary)
+      .cursor_pointer().on_click((_e, cx) => this.refresh(cx)).child(name);
+    const row = h_flex().items_center().gap(0).child(head);
+    if (info?.error || !windows.length) {
+      return row.child(div().px(4).text_color(t.dim).tooltip(summary).child(info?.error ? "–" : "…"));
+    }
+    return row.children(windows.map((w, i) => {
+      const extra = w.label === "week" && extras.length ? ` · ${extras.join(" · ")}` : "";
+      return this.chip(`${id}-${i}`, name, w, this.describe(name, w) + extra, t);
+    }));
   }
 
   render() {
@@ -82,6 +119,7 @@ export default class UsageMeter extends View {
       .bg(t.chrome).border_t(1).border_l(1).border_color(t.border)
       .text_size(11.8)
       .child(this.meter("um-claude", "Claude", d?.claude, t))
+      .child(div().w(1).h(12).mx(4).bg(t.border))
       .child(this.meter("um-codex", "Codex", d?.codex, t));
   }
 }

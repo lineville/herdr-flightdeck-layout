@@ -54,11 +54,19 @@ def claude():
     except Exception as e:
         return {"error": http_error(e)}
     windows = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "week")):
+    for key, label, length in (("five_hour", "5h", 5 * 3600), ("seven_day", "week", 7 * 86400)):
         w = d.get(key)
         if w and w.get("utilization") is not None:
-            windows.append({"label": label, "percent": w["utilization"], "resets": iso_to_epoch(w.get("resets_at"))})
-    return {"windows": windows}
+            windows.append({"label": label, "percent": w["utilization"],
+                            "resets": iso_to_epoch(w.get("resets_at")), "length": length})
+    # Per-model weekly limits (Fable today), shown in the tooltip only.
+    extras = []
+    for lim in d.get("limits") or []:
+        model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+        if lim.get("kind") == "weekly_scoped" and model and lim.get("percent") is not None:
+            extras.append({"label": f"{model} week", "percent": lim["percent"],
+                           "resets": iso_to_epoch(lim.get("resets_at"))})
+    return {"windows": windows, "extras": extras}
 
 
 def codex():
@@ -82,7 +90,7 @@ def codex():
             continue
         secs = w.get("limit_window_seconds") or 0
         label = "week" if secs >= 6 * 86400 else f"{round(secs / 3600)}h" if secs else key.split("_")[0]
-        windows.append({"label": label, "percent": w["used_percent"], "resets": w.get("reset_at")})
+        windows.append({"label": label, "percent": w["used_percent"], "resets": w.get("reset_at"), "length": secs or None})
     return {"windows": windows, "plan": d.get("plan_type")}
 
 
