@@ -267,9 +267,9 @@ export default class Worktree extends View {
     return "";
   }
 
-  // Renames the branch and moves the checkout to the new branch's folder. The checks
-  // run before any terminal closes. If the branch rename fails after the move, the
-  // folder moves back.
+  // Renames the branch and moves the checkout to the new branch's folder. Name and
+  // path checks run before any terminal closes. If the move fails, a terminal reopens
+  // in the old folder; if the branch rename fails after the move, the folder moves back.
   async rename() {
     const from = props().from;
     const to = this.text.trim();
@@ -282,13 +282,16 @@ export default class Worktree extends View {
     const moving = path !== top;
     if (moving) {
       if ((await exec("test", ["-e", path], { on: this.on })).code === 0) return `${tilde(path, this.userHome)} already exists.`;
-      if ((await exec("test", ["-e", `${top}/.gitmodules`], { on: this.on })).code === 0) return "git can't move a worktree that has submodules.";
     }
     const space = spaces().find((x) => x.id === props().space);
     const had = moving && closeIn(space, top, this.repo.main);
     if (moving) {
       const mv = await git(this.repo.main, ["worktree", "move", top, path], this.on, 600_000);
-      if (!mv.ok) return mv.err || "git worktree move failed.";
+      // git decides whether submodules block the move. If it refuses, reopen a terminal where it was.
+      if (!mv.ok) {
+        if (had && space) run("tab.new", { space: space.id, folder: top, name: from });
+        return mv.err || "git worktree move failed.";
+      }
     }
     const at = moving ? path : top;
     const br = await git(at, ["branch", "-m", from, to], this.on);
