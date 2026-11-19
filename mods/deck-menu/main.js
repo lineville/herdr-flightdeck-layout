@@ -36,8 +36,8 @@ function items(p) {
     return ps.length && ps.every((x) => x.cwd && (x.cwd === p.path || x.cwd.startsWith(p.path + "/")));
   });
   return [
-    ...(p.pr?.url ? [{ label: `Open PR #${p.pr.number}`, icon: icon("mods/deck-menu/github.svg", "foreground"), run: open(p.pr.url) }] : []),
-    ...(p.ticket?.url ? [{ label: `Open ${p.ticket.id} in Linear`, icon: icon("mods/deck-menu/linear.svg", "foreground"), run: open(p.ticket.url) }] : []),
+    ...(p.pr?.url ? [{ label: "Open in GitHub", icon: icon("mods/deck-menu/github.svg", "foreground"), run: open(p.pr.url) }] : []),
+    ...(p.ticket?.url ? [{ label: "Open in Linear", icon: icon("mods/deck-menu/linear.svg", "foreground"), run: open(p.ticket.url) }] : []),
     { label: "Open Pi chat", icon: icon("icons/pi.svg", "foreground"), run: () => s?.machine
       ? run("tab.new", { space: p.space, folder: p.path, name: p.branch, argv: ["env", "PI_TUI=1", "pi"] })
       : run("tab.new", { space: p.space, name: p.branch, mod: "chat", props: { chat: `c-${randomBytes(4).toString("hex")}`, provider: "pi", cwd: p.path } }) },
