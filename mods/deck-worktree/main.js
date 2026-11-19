@@ -1,5 +1,7 @@
 // Worktree dialog: { space, action: "new" | "open" | "remove" } or
 // { folder, machine } for a repo without a space; optional { branch, tab, argv }.
+// { space, folder, from, action: "rename" } renames a linked worktree's branch and
+// moves its folder to match.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
@@ -109,15 +111,35 @@ async function repoOf(folder, on) {
   return { top: top.out, main, name: main.split("/").pop(), linked: main !== top.out };
 }
 
+// Closes the terminals in `top`: tabs wholly in it close, panes in it of mixed tabs
+// close, and the space stays open (a tab at `main` opens first if nothing would be
+// left). Returns whether anything closed.
+function closeIn(space, top, main) {
+  if (!space?.tabs) return false;
+  const all = panes();
+  const plan = space.tabs.map((t) => {
+    const ps = all.filter((p) => p.tab === t.id);
+    const gone = ps.filter((p) => p.terminal && inside(p.cwd, top));
+    return { t, gone, whole: gone.length > 0 && gone.length === ps.length };
+  });
+  if (plan.every((x) => x.whole)) run("tab.new", { space: space.id, folder: main });
+  for (const x of plan) {
+    if (x.whole) run("tab.close", { id: x.t.id, confirmed: true });
+    else for (const p of x.gone) run("pane.close", { pane: p.pane });
+  }
+  return plan.some((x) => x.gone.length > 0);
+}
+
 export default class Worktree extends View {
   init(_props, cx) {
     this.on = this.space()?.machine;
     this.userHome = this.on ? null : home();
     this.opening = props()?.action === "open";
-    this.text = props()?.branch ?? "";
+    this.renaming = props()?.action === "rename";
+    this.text = (this.renaming ? props()?.from : props()?.branch) ?? "";
     this.list = undefined; // open: the checkouts, once read
     this.at = 0;
-    this.input = InputState.new({ value: this.text, placeholder: this.opening ? "filter worktrees" : "branch name" });
+    this.input = InputState.new({ value: this.text, placeholder: this.opening ? "filter worktrees" : this.renaming ? "new branch name" : "branch name" });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = ""; this.at = 0; cx.notify(); });
     this.input.on("submit", (_e, cx) => this.go(cx));
     this.inputFocused = true;
@@ -179,7 +201,10 @@ export default class Worktree extends View {
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = props().action === "remove" ? await this.remove() : await this.create(); }
+    try {
+      const a = props().action;
+      this.error = a === "remove" ? await this.remove() : a === "rename" ? await this.rename() : await this.create();
+    }
     catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
@@ -230,22 +255,8 @@ export default class Worktree extends View {
     this.dirty ||= status.out !== "";
     this.unpushed = [...new Set([...this.unpushed, ...unpushed])];
     if (changed) return "It changed since this opened. Enter again removes it anyway.";
-    // Terminals first: a shell sitting in the folder keeps it busy. Tabs wholly in
-    // the worktree close; panes of mixed tabs close; the repo's space stays open.
-    const space = spaces().find((x) => x.id === props().space);
-    if (space?.tabs) {
-      const all = panes();
-      const plan = space.tabs.map((t) => {
-        const ps = all.filter((p) => p.tab === t.id);
-        const gone = ps.filter((p) => p.terminal && inside(p.cwd, this.repo.top));
-        return { t, gone, whole: gone.length > 0 && gone.length === ps.length };
-      });
-      if (plan.every((x) => x.whole)) run("tab.new", { space: space.id, folder: this.repo.main });
-      for (const x of plan) {
-        if (x.whole) run("tab.close", { id: x.t.id, confirmed: true });
-        else for (const p of x.gone) run("pane.close", { pane: p.pane });
-      }
-    }
+    // Terminals first: a shell sitting in the folder keeps it busy.
+    closeIn(spaces().find((x) => x.id === props().space), this.repo.top, this.repo.main);
     const force = this.dirty || mods.length > 0;
     const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
     if (!r.ok) return r.err || "git worktree remove failed.";
@@ -253,6 +264,48 @@ export default class Worktree extends View {
     const kept = shared("deck.kept") ?? {};
     const next = Object.fromEntries(Object.entries(kept).map(([id, list]) => [id, list.filter((k) => k.path !== this.repo.top)]).filter(([, list]) => list.length));
     if (JSON.stringify(next) !== JSON.stringify(kept)) setShared("deck.kept", next);
+    return "";
+  }
+
+  // Renames the branch and moves the checkout to the new branch's folder. The checks
+  // run before any terminal closes. If the branch rename fails after the move, the
+  // folder moves back.
+  async rename() {
+    const from = props().from;
+    const to = this.text.trim();
+    const top = this.repo.top;
+    if (!to) return "Type a branch name.";
+    if (to === from) return "That's the current name.";
+    if (!(await git(top, ["check-ref-format", "--branch", to], this.on)).ok) return `${to} isn't a valid branch name.`;
+    if ((await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${to}`], this.on)).ok) return `Branch ${to} already exists.`;
+    const path = `${ROOT(this.userHome)}/${this.repo.name}/${slug(to)}`;
+    const moving = path !== top;
+    if (moving) {
+      if ((await exec("test", ["-e", path], { on: this.on })).code === 0) return `${tilde(path, this.userHome)} already exists.`;
+      if ((await exec("test", ["-e", `${top}/.gitmodules`], { on: this.on })).code === 0) return "git can't move a worktree that has submodules.";
+    }
+    const space = spaces().find((x) => x.id === props().space);
+    const had = moving && closeIn(space, top, this.repo.main);
+    if (moving) {
+      const mv = await git(this.repo.main, ["worktree", "move", top, path], this.on, 600_000);
+      if (!mv.ok) return mv.err || "git worktree move failed.";
+    }
+    const at = moving ? path : top;
+    const br = await git(at, ["branch", "-m", from, to], this.on);
+    if (!br.ok) {
+      if (moving) await git(this.repo.main, ["worktree", "move", path, top], this.on, 600_000);
+      return br.err || "git branch -m failed.";
+    }
+    // Carry the tree's state over to the new path: its place in the kept list and its color.
+    const kept = shared("deck.kept") ?? {};
+    const nextKept = Object.fromEntries(Object.entries(kept).map(([id, list]) => [id, list.map((k) => (k.path === top ? { ...k, path: at, branch: to } : k))]));
+    if (JSON.stringify(nextKept) !== JSON.stringify(kept)) setShared("deck.kept", nextKept);
+    const colors = shared("worktree.colors") ?? {};
+    if (moving && colors[top]) {
+      const { [top]: color, ...rest } = colors;
+      setShared("worktree.colors", { ...rest, [at]: color });
+    }
+    if (had && space) run("tab.new", { space: space.id, folder: at, name: to });
     return "";
   }
 
@@ -339,9 +392,10 @@ export default class Worktree extends View {
     const t = theme();
     if (this.opening) return this.renderOpen(t);
     const remove = props()?.action === "remove";
+    const rename = this.renaming;
     const s = this.space();
     const r = this.repo;
-    const title = remove ? `Remove worktree ${r?.top ? base(r.top) : ""}?` : `New worktree${r ? ` of ${r.name}` : ""}`;
+    const title = remove ? `Remove worktree ${r?.top ? base(r.top) : ""}?` : rename ? `Rename worktree ${props()?.from ?? ""}` : `New worktree${r ? ` of ${r.name}` : ""}`;
     const detail =
       r === undefined
         ? "…"
@@ -351,8 +405,12 @@ export default class Worktree extends View {
             ? !r.linked
               ? "This is the repository's main checkout, not a worktree."
               : `Closes its tabs and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new tab running Pi on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
-    const blocked = !r || (remove && !r.linked);
+            : rename
+              ? !r.linked
+                ? "This is the repository's main checkout, not a worktree."
+                : `Renames the local branch and moves the folder to ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/<new name>. Its terminals close and one reopens there. The remote branch keeps its name.`
+              : `A new tab running Pi on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
+    const blocked = !r || ((remove || rename) && !r.linked);
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -388,7 +446,7 @@ export default class Worktree extends View {
           .text_color(t.dim)
           .gap(6)
           .when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
-          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
+          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : rename ? "↵ rename · esc cancel" : "↵ create · esc cancel"),
       );
   }
 }

@@ -45,6 +45,7 @@ function items(p) {
     { label: "New terminal", icon: icon("terminal"), run: () => run("tab.new", { space: p.space, folder: p.path, name: p.branch }) },
     ...(mine.length ? [{ label: "Close its tabs", icon: icon("x"), run: () => mine.forEach((t) => run("tab.close", { id: t.id, confirmed: true })) }] : []),
     ...(p.empty ? [{ label: "Hide from sidebar", icon: icon("x"), run: hide(p.space, p.path) }] : []),
+    ...(p.git && !p.main && p.branch ? [{ label: "Rename worktree…", icon: icon("square-pen"), run: () => dialog({ space: p.space, folder: p.path, from: p.branch, action: "rename" }) }] : []),
     ...(p.git && !p.main ? [{ label: "Remove worktree…", icon: icon("archive"), run: () => dialog({ space: p.space, folder: p.path, action: "remove" }) }] : []),
   ];
 }

@@ -766,7 +766,7 @@ export default class Spaces extends View {
       return ps.length && ps.every((x) => x.cwd && inside(x.cwd, g.path));
     });
     const empty = g.panes.length === 0;
-    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0);
+    const count = 3 + (pr ? 1 : 0) + (ticket ? 1 : 0) + (mine.length ? 1 : 0) + (empty ? 1 : 0) + (g.git && !g.main ? 1 : 0) + (g.git && !g.main && g.branch ? 1 : 0);
     this.menu({ kind: "worktree", space: s.id, path: g.path, branch: g.branch, main: g.main, git: g.git, empty, pr, ticket }, 36 + count * 30);
   }
 
