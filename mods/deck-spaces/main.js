@@ -286,6 +286,7 @@ export default class Spaces extends View {
     this.open = []; // [{ s, g }] worktrees shown, set on render
     this.avatars = {}; // space id -> { folder, path, at }; path is relative to the app folder, or null
     this.owners = {}; // GitHub owner -> Promise of its cached avatar path, or null
+    this.pinned = new Map(); // space id -> the repo name it was renamed to
     this.avatarBusy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("tree.folded") ?? "[]"));
     this.expanded = new Set(JSON.parse(localStorage.getItem("tree.expanded") ?? "[]")); // Completed folders are folded unless here
@@ -433,6 +434,7 @@ export default class Spaces extends View {
     this.refreshPrs(cx);
     this.sweep(cx);
     this.refreshAvatars(cx);
+    this.pinNames();
     if (this.busy) return;
     const now = Date.now();
     const ps = panes();
@@ -461,6 +463,20 @@ export default class Spaces extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  // Names each unnamed space after its repo (its main checkout's folder). Herdr calls an
+  // unnamed space after where its first terminal is, so closing that tab would rename it
+  // after the next terminal's worktree. Renaming it once makes the name stay.
+  pinNames() {
+    for (const s of spaces()) {
+      if (s.named) continue;
+      const main = this.wt[s.id]?.list?.find((w) => w.main)?.path;
+      const name = main?.replace(/\/+$/, "").split("/").pop();
+      if (!name || this.pinned.get(s.id) === name) continue;
+      this.pinned.set(s.id, name);
+      try { run("space.rename", { id: s.id, name }); } catch {}
+    }
   }
 
   // Looks up each space's avatar when it is new, when its folder changes, or, if it had
