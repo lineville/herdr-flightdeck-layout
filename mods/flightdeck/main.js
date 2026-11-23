@@ -4,7 +4,8 @@
 // takes its worktree's color, so craft working in one branch share a hue. Sub-agents circle
 // their parent.
 // Fleet mode lays the planets out on a grid that fits the view; System mode shows one.
-// Styled dark and flat: grayscale, one cyan accent (#2EE6FF), IBM Plex Sans and Mono.
+// Styled dark and flat: grayscale chrome, one cyan accent (#2EE6FF), IBM Plex Sans and Mono.
+// Planets are the one place with colour: each space gets its own world from planets/.
 
 import { View, div, svg, image, PathBuilder } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
@@ -12,7 +13,7 @@ import { agents, focused, hc, props, run, settings, shared, spaces, terminals, p
 import { createDemo } from "./demo.js";
 import {
   DEFAULT_VIEW, LAND_MS, LAUNCH_MS, PITCH_MAX, PITCH_MIN, R_RATE, TAU, ZOOM_MAX, ZOOM_MIN, add, ascent, camera, clamp01,
-  descent, moonOrbitOf, moonPadPoint, moonRing, orbitOf, orbitPaths, orbitPoint, padPoint, project, radiusFor, spreadRadii, startAngle,
+  descent, moonOrbitOf, moonPadPoint, moonRing, orbitOf, orbitPaths, orbitPoint, padPoint, project, radiusFor, scale, spreadRadii, startAngle,
 } from "./orbit.js";
 import { modelLook, parseStatusLine } from "./telemetry.js";
 import { ChatTelemetry, chatOf } from "./chats.js";
@@ -59,6 +60,21 @@ const ORBIT_HUES = ["#8cabff", "#58d6b5", "#f257a5", "#b061ff", "#d9c27a", "#c0c
 const orbitHue = (slot) => ORBIT_HUES[slot % ORBIT_HUES.length];
 // Space colors, the same as the sidebar's avatars.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
+// Each space gets its own world from planets/ (drawn by planets/make.py). `size` is its radius
+// against the orbits' unit planet; `extent` is how much wider its art is than its disc (rings).
+const PLANETS = [
+  { file: "jovian", size: 1.15, extent: 1 },
+  { file: "terran", size: 0.9, extent: 1 },
+  { file: "cinder", size: 0.72, extent: 1 },
+  { file: "glacier", size: 0.82, extent: 1 },
+  { file: "saturnine", size: 0.95, extent: 1.93 },
+  { file: "dust", size: 0.8, extent: 1 },
+  { file: "toxic", size: 1.02, extent: 1 },
+  { file: "rock", size: 0.66, extent: 1 },
+  { file: "neptune", size: 1.05, extent: 1.52 },
+  { file: "magenta", size: 0.88, extent: 1 },
+];
+const hashOf = (s) => { let h = 2166136261; for (const ch of String(s)) h = Math.imul(h ^ ch.codePointAt(0), 16777619); return h >>> 0; };
 const ORBIT_GRAY = C.fg2; // orbits stay neutral so they don't compete with the craft
 const ORBIT_NEAR_ALPHA = "8c"; // 55%
 const ORBIT_FAR_ALPHA = "4d"; // 30%
@@ -345,7 +361,27 @@ export default class FlightDeck extends View {
   }
 
   pad(c) {
-    return c.parent ? moonPadPoint(c.slot) : padPoint(c.slot);
+    return c.parent ? moonPadPoint(c.slot) : scale(padPoint(c.slot), this.planetOf(c.space).size);
+  }
+
+  // A space's world: picked by its name, so a repo keeps its planet, and moved on to the next
+  // free one when another space already has it, so the fleet doesn't repeat until it must.
+  planetOf(id) {
+    const all = this.src.spaces();
+    const key = all.map((s) => `${s.id}:${s.name}`).join("|");
+    if (this.planetKey !== key) {
+      this.planetKey = key;
+      this.planets = new Map();
+      const taken = new Set();
+      for (const s of [...all].sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
+        let i = hashOf(s.name || s.id) % PLANETS.length;
+        for (let n = 0; n < PLANETS.length && taken.has(i); n++) i = (i + 1) % PLANETS.length;
+        taken.add(i);
+        if (taken.size >= PLANETS.length) taken.clear();
+        this.planets.set(s.id, PLANETS[i]);
+      }
+    }
+    return this.planets.get(id) ?? PLANETS[0];
   }
 
   angleAt(c, t) {
@@ -426,7 +462,7 @@ export default class FlightDeck extends View {
       const size = c.parent ? (many ? 9 : 12) : Math.max(least, Math.min(30, cam.planetPx * 0.2)) * look.size;
       const s = Math.round(size * q.scale);
       const off = Math.hypot(q.x - cam.cx, q.y - cam.cy);
-      const hidden = q.behind && off < cam.planetPx + s * 0.2;
+      const hidden = q.behind && off < cam.planetPx * this.planetOf(c.space).size + s * 0.2;
       this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: hidden ? 0 : q.behind ? 0.55 : 1 });
     }
     // Rings for moons in flight, around where their parent will be at `t`.
@@ -674,7 +710,7 @@ export default class FlightDeck extends View {
       .when(shown.length === 0, (el) => el.child(v_flex().absolute().left(0).w(vp.w).top(vp.h / 2 - 20).items_center().gap(4)
         .child(mono(11, C.fg2, 600).child("NO SYSTEMS"))
         .child(sans(13, C.fg3).child("Open a repo as a space to start one."))))
-      .when(shown.length === 1 && list.length === 0, (el) => el.child(v_flex().absolute().left(0).w(vp.w).top(this.cam.cy + this.cam.planetPx + 18).items_center().gap(4)
+      .when(shown.length === 1 && list.length === 0, (el) => el.child(v_flex().absolute().left(0).w(vp.w).top(this.cam.cy + this.cam.planetPx * this.planetOf(shown[0].id).size + 18).items_center().gap(4)
         .child(mono(11, C.fg2, 600).child("NO CREW IN THIS SYSTEM"))
         .child(sans(13, C.fg3).child("Start an agent in this space to launch it."))));
   }
@@ -685,7 +721,9 @@ export default class FlightDeck extends View {
     const cam = this.cams.get(cell.space.id);
     if (!cam) return [];
     const s = cell.space;
-    const d = cam.planetPx * 2;
+    const world = this.planetOf(s.id);
+    const d = cam.planetPx * 2 * world.size;
+    const art = d * world.extent;
     const color = this.spaceColor(s.id);
     const active = s.id === this.src.focused()?.space;
     const fleet = this.cells.length > 1;
@@ -694,7 +732,7 @@ export default class FlightDeck extends View {
     const out = [
       div().absolute().left(cam.cx - atmo / 2).top(cam.cy - atmo / 2).w(atmo).h(atmo).rounded(atmo / 2)
         .border(active ? 2 : 1).border_color(`${color}${active ? "cc" : "55"}`).bg(`${color}14`),
-      image(`${ASSET}/globe.svg`).absolute().left(cam.cx - d / 2).top(cam.cy - d / 2).w(d).h(d),
+      image(`${ASSET}/planets/${world.file}.svg`).absolute().left(cam.cx - art / 2).top(cam.cy - art / 2).w(art).h(art),
     ];
     if (fleet && active) {
       // Thin corner brackets around the shown space's planet.
