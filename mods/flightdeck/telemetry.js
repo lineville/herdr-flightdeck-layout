@@ -40,6 +40,15 @@ export function parseStatusLine(text) {
   return null;
 }
 
+// The short model name for a chat host's model ({ id, name }), in the same form the status
+// line gives: "claude-opus-5-5" reads as "opus 5.5". Claude chats report an alias id
+// ("opus"), so the reading with a version wins.
+export function chatModel(model) {
+  if (!model) return null;
+  const found = [model.id, model.name].map((s) => findModel(String(s ?? ""))).filter(Boolean);
+  return found.find((m) => /\d/.test(m)) ?? found[0] ?? model.name ?? model.id ?? null;
+}
+
 // How a model looks: its glyph, and a size for how capable it is (1 is the middle).
 // Bigger reads as smarter; mini and nano variants shrink, pro variants grow.
 export function modelLook(model, app) {

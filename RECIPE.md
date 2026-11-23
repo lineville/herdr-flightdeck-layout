@@ -81,7 +81,7 @@ The window keeps the person's own theme and fonts; Flight Deck draws on its own 
 - A new mod docks itself into the shown layout as a root block unless its `mod.json` has `"place": "none"`; `usage-meter` sets it.
 - Every Pi launch in the layout (worktree `+`, worktree menu, New worktree, the `+` menu) opens the `chat` mod from herdr-chat; without it those tabs show the mod as not loaded. Terminal-UI launches run `env PI_TUI=1 pi` so a shell `pi` function that opens chats (Liam's `herdr-pi-chat` block in `~/.zshrc`, not part of this repo) leaves them alone.
 - Without herdr-chat installed, right-clicking a terminal falls back to Herdr's `menu` with a warning, and the `new-chat-commands` block shows as not loaded. Install it with `curl -fsSL https://raw.githubusercontent.com/ChmaraX/herdr-chat/main/install.sh | sh -s -- --app`, or delete `terminal_menu` and the `floating` block from the root.
-- Flight Deck reads each agent's status line with `hc read` every 5 seconds for its model and context; see the mod's recipe.
+- Flight Deck reads each agent's status line with `hc read` every 5 seconds for its model and context, and asks a herdr-chat agent's host instead; see the mod's recipe.
 
 ## Done when
 

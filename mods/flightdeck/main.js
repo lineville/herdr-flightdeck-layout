@@ -15,6 +15,7 @@ import {
   descent, moonOrbitOf, moonPadPoint, moonRing, orbitOf, orbitPaths, orbitPoint, padPoint, project, radiusFor, spreadRadii, startAngle,
 } from "./orbit.js";
 import { modelLook, parseStatusLine } from "./telemetry.js";
+import { ChatTelemetry, chatOf } from "./chats.js";
 
 const READ_MS = 5000; // how often each agent's status line is read for its model and context
 
@@ -164,12 +165,26 @@ export default class FlightDeck extends View {
       });
     }
     // Reads the shown systems' agents one at a time. A status line that doesn't show (a dialog
-    // over it) keeps the last reading.
+    // over it) keeps the last reading. Chat-hosted agents show a transcript instead, so their
+    // host reports model and context over a link (chats.js).
+    if (!this.demo) {
+      this.chatOf = new Map(); // address -> chat
+      this.chats = new ChatTelemetry((cx) => { if (this.takeChats()) { this.wake?.(); cx.notify(); } });
+    }
     if (!this.demo) cx.spawn(async (cx) => {
       for (;;) {
         const ids = new Set(this.shown().map((s) => s.id));
-        let changed = false;
-        for (const a of this.src.agents().filter((x) => ids.has(x.space))) {
+        const shownAgents = this.src.agents().filter((x) => ids.has(x.space));
+        const byAddress = new Map(this.src.terminals().map((t) => [t.address, t]));
+        this.chatOf = new Map();
+        for (const a of shownAgents) {
+          const chat = chatOf(byAddress.get(a.address));
+          if (chat) this.chatOf.set(a.address, chat);
+        }
+        this.chats.want(new Set(this.chatOf.values()), cx);
+        let changed = this.takeChats();
+        for (const a of shownAgents) {
+          if (this.chatOf.has(a.address)) continue;
           try {
             const res = await hc(["read", a.address, "--lines", "16"]);
             const got = parseStatusLine(res?.stdout);
@@ -195,6 +210,19 @@ export default class FlightDeck extends View {
         }
       }
     });
+  }
+
+  // Copies the chat hosts' readings into telemetry. True when one changed.
+  takeChats() {
+    let changed = false;
+    for (const [address, chat] of this.chatOf) {
+      const got = this.chats.get(chat);
+      if (!got) continue;
+      const old = this.telemetry.get(address);
+      const next = { ctx: got.ctx ?? old?.ctx ?? null, model: got.model ?? old?.model ?? null };
+      if (!old || old.ctx !== next.ctx || old.model !== next.model) { this.telemetry.set(address, next); changed = true; }
+    }
+    return changed;
   }
 
   // ---- model ------------------------------------------------------------------------
