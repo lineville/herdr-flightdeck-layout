@@ -75,11 +75,6 @@ const PLANETS = [
   { file: "magenta", size: 0.88, extent: 1 },
 ];
 const hashOf = (s) => { let h = 2166136261; for (const ch of String(s)) h = Math.imul(h ^ ch.codePointAt(0), 16777619); return h >>> 0; };
-// Systems float about their cells: up to DRIFT_SHARE of the cell, never more than DRIFT_MAX px,
-// on sine waves of about DRIFT_MS a turn. props.drift: false holds them still.
-const DRIFT_SHARE = 0.07;
-const DRIFT_MAX = 36;
-const DRIFT_MS = 46000;
 const ORBIT_GRAY = C.fg2; // orbits stay neutral so they don't compete with the craft
 const ORBIT_NEAR_ALPHA = "8c"; // 55%
 const ORBIT_FAR_ALPHA = "4d"; // 30%
@@ -173,7 +168,6 @@ export default class FlightDeck extends View {
     const p = props() ?? {};
     this.demo = p.demo ? createDemo(this.clock, Number(p.demoStart) || 0) : null;
     this.src = this.demo ?? { agents, spaces, terminals, focused };
-    this.drifting = p.drift !== false;
     const frameMs = Number(p.fps) > 0 ? Math.max(33, Math.round(1000 / Number(p.fps))) : 0;
     this.fastMs = frameMs || FAST_MS;
     this.slowMs = frameMs || SLOW_MS;
@@ -433,18 +427,7 @@ export default class FlightDeck extends View {
       if (c.phase === "orbit" && c.parent) return this.fastMs;
       if (c.phase === "orbit") orbiting = true;
     }
-    // Drifting systems keep the view ticking even when nothing flies.
-    return orbiting || (this.drifting && ids.size) ? this.slowMs : 0;
-  }
-
-  // How far a system has floated from its cell's centre at `t`: two slow sine waves with
-  // periods and phases of its own, so systems never move in step. `amp` is its room.
-  driftAt(id, t, amp) {
-    if (!this.drifting) return { dx: 0, dy: 0 };
-    const h = hashOf(id);
-    const px = DRIFT_MS + (h % 17000), py = DRIFT_MS * 1.31 + ((h >>> 8) % 19000);
-    const fx = ((h >>> 4) % 628) / 100, fy = ((h >>> 12) % 628) / 100;
-    return { dx: amp.x * Math.sin((TAU * t) / px + fx), dy: amp.y * Math.sin((TAU * t) / py + fy) };
+    return orbiting ? this.slowMs : 0;
   }
 
   // Lays the systems out, then works out each craft's next spot. Each one glides there over `dur`.
@@ -459,16 +442,11 @@ export default class FlightDeck extends View {
     this.cells = grid(shown.length, vp.w, vp.h).map((cell, i) => ({ ...cell, space: shown[i] }));
     this.cams = new Map();
     const many = this.cells.length > 1;
-    this.drift = new Map();
     for (const cell of this.cells) {
-      // The system is framed inside its cell less its drift room, so floating never takes
-      // its orbits past the cell's edge.
-      const amp = this.drifting ? { x: Math.min(DRIFT_MAX, cell.w * DRIFT_SHARE), y: Math.min(DRIFT_MAX, cell.h * DRIFT_SHARE) } : { x: 0, y: 0 };
-      const cam = camera(cell.w - 2 * amp.x, cell.h - 2 * amp.y, this.look);
-      cam.cx += cell.x + amp.x;
-      cam.cy += cell.y + amp.y;
+      const cam = camera(cell.w, cell.h, this.look);
+      cam.cx += cell.x;
+      cam.cy += cell.y;
       this.cams.set(cell.space.id, cam);
-      this.drift.set(cell.space.id, this.driftAt(cell.space.id, t, amp));
       const tops = [...this.craft.values()].filter((c) => c.space === cell.space.id && !c.parent);
       const goals = spreadRadii(tops.map((c) => ({ key: c.address, r: radiusFor(this.telemetry.get(c.address)?.ctx ?? 0) })));
       for (const c of tops) { c.rGoal = goals.get(c.address) ?? c.rGoal; this.advance(c, this.now); }
@@ -486,8 +464,7 @@ export default class FlightDeck extends View {
       const s = Math.round(size * q.scale);
       const off = Math.hypot(q.x - cam.cx, q.y - cam.cy);
       const hidden = q.behind && off < cam.planetPx * this.planetOf(c.space).size + s * 0.2;
-      const d = this.drift.get(c.space);
-      this.frame.set(c.address, { x: q.x + d.dx, y: q.y + d.dy, s, opacity: hidden ? 0 : q.behind ? 0.55 : 1 });
+      this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: hidden ? 0 : q.behind ? 0.55 : 1 });
     }
     // Rings for moons in flight, around where their parent will be at `t`.
     this.moonRings = [];
@@ -498,8 +475,7 @@ export default class FlightDeck extends View {
       const pf = this.frame.get(p.address);
       if (!pf || pf.opacity === 0) continue;
       const ring = moonRing(cam, this.worldAt(p, p.shown ? t : this.now), this.orbit(c));
-      const d = this.drift.get(c.space);
-      this.moonRings.push({ key: c.address, opacity: pf.opacity, ...ring, x: ring.x + d.dx, y: ring.y + d.dy });
+      this.moonRings.push({ key: c.address, opacity: pf.opacity, ...ring });
     }
   }
 
@@ -674,22 +650,13 @@ export default class FlightDeck extends View {
       });
       const rings = tops.map((c) => {
         const p = orbitPaths(this.cams.get(c.space), orbitOf(c.slot, c.r));
-        return { space: c.space, far: build(p.far), near: build(p.near), farColor: `${ORBIT_GRAY}${ORBIT_FAR_ALPHA}`, nearColor: `${ORBIT_GRAY}${ORBIT_NEAR_ALPHA}` };
+        return { far: build(p.far), near: build(p.near), farColor: `${ORBIT_GRAY}${ORBIT_FAR_ALPHA}`, nearColor: `${ORBIT_GRAY}${ORBIT_NEAR_ALPHA}` };
       });
       this.orbitCache = { key, rings };
     }
     const layer = (path, color) => (path ? window.paint_path(path, color).absolute().left(0).top(0).w(vp.w).h(vp.h) : null);
-    // Each system's orbits and planet ride in a layer that glides to the system's drift.
-    const drifted = (id, kind, children) => {
-      const d = this.drift?.get(id) ?? { dx: 0, dy: 0 };
-      return div().id(`drift-${kind}-${id}`).absolute().left(d.dx).top(d.dy).w(vp.w).h(vp.h)
-        .transition("left", { duration: this.dur, easing: "linear" }).transition("top", { duration: this.dur, easing: "linear" })
-        .children(children);
-    };
-    const ringLayer = (side, color) => this.cells.map((cell) => drifted(cell.space.id, side,
-      this.orbitCache.rings.filter((r) => r.space === cell.space.id).flatMap((r) => r[side].map((p) => layer(p, r[color])))));
-    const farRings = ringLayer("far", "farColor");
-    const nearRings = ringLayer("near", "nearColor");
+    const farRings = this.orbitCache.rings.flatMap((r) => r.far.map((p) => layer(p, r.farColor)));
+    const nearRings = this.orbitCache.rings.flatMap((r) => r.near.map((p) => layer(p, r.nearColor)));
     const moonDur = { duration: this.dur, easing: "linear" };
     const moonPath = (run) => {
       let path = PathBuilder.stroke(1.2).dash_array(MOON_DOTS).move_to(run[0][0], run[0][1]);
@@ -738,7 +705,7 @@ export default class FlightDeck extends View {
       })
       .child(image(`${ASSET}/stars.svg`).absolute().left((vp.w - starSide) / 2).top((vp.h - starSide) / 2).w(starSide).h(starSide))
       .children(farRings)
-      .children(this.cells.map((cell) => drifted(cell.space.id, "planet", this.planet(cell, list))))
+      .children(this.cells.flatMap((cell) => this.planet(cell, list)))
       .children(nearRings)
       .children(moonRings)
       .children(bodies)
