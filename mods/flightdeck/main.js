@@ -155,6 +155,7 @@ export default class FlightDeck extends View {
     this.view = null; // System mode: a system picked by hand; null follows the shown space
     this.mode = store.get(MODE_KEY, (m) => m === "fleet" || m === "system", "fleet");
     this.hover = null;
+    this.hoverParts = new Set(); // "address|part" under the pointer: a craft's halo, its tag, its manifest row
     this.dur = SLOW_MS;
     this.orbitCache = null;
     this.look = loadView();
@@ -557,6 +558,9 @@ export default class FlightDeck extends View {
     const ids = new Set(shown.map((s) => s.id));
     const list = this.src.agents().filter((a) => ids.has(a.space));
     this.agentBy = new Map(list.map((a) => [a.address, a]));
+    // A craft that leaves the view never reports the pointer leaving it.
+    for (const k of this.hoverParts) if (!this.agentBy.has(k.slice(0, k.lastIndexOf("|")))) this.hoverParts.delete(k);
+    if (this.hover && !this.agentBy.has(this.hover)) this.hover = null;
     this.cwd = new Map((this.demo ? [] : panes()).map((p) => [p.pane, p.cwd]));
     this.sync(list);
     this.rows = this.buildRows(shown, list);
@@ -870,25 +874,51 @@ export default class FlightDeck extends View {
     const quiet = c.phase === "parked" && !lit;
     const small = this.cells.length > 1;
     const max = small ? 18 : 24;
-    const tag = v_flex().absolute().top(box / 2 - (c.parent ? 15 : 22)).gap(1).when(quiet, (el) => el.opacity(0)).px(5).py(2).rounded(2).bg("#000000cc")
+    const focus = (_e, cx) => { if (this.dragged || this.demo) return; run("agent.focus", { terminal: a.address }); cx.notify(); };
+    const tag = v_flex().id(`craft-tag-${a.address}`).absolute().top(box / 2 - (c.parent ? 15 : 22)).gap(1).when(quiet, (el) => el.opacity(0)).px(5).py(2).rounded(2).bg("#000000cc")
       .when(!flip, (el) => el.left(box + 10)).when(flip, (el) => el.right(box + 10).items_end())
       .child(mono(c.parent || small ? 9.5 : 10.5, lit ? C.fg : c.parent ? C.fg2 : C.fg, 600).child(name.length > max ? `${name.slice(0, max - 1)}…` : name))
       .when(!c.parent || lit, (el) => el.child(mono(9.5, wordColor, 500).child(word)))
       .when(Boolean(wt) && !c.parent && (lit || !small), (el) => el.child(mono(9.5, hue, 500).child(`⎇ ${wt.branch}`)))
-      .when(!c.parent && (lit || !small), (el) => el.child(mono(9.5, C.fg3, 500).child(this.meta(tel))));
+      .when(!c.parent && (lit || !small), (el) => el.child(mono(9.5, C.fg3, 500).child(this.meta(tel))))
+      // A shown tag is part of the target; a hidden one (a docked craft's) isn't, so the
+      // planet's face doesn't light up tags you can't see.
+      .when(!quiet, (el) => el.cursor_pointer()
+        .on_hover((hovered, cx) => this.setHover(a.address, "tag", hovered, cx))
+        .on_click(focus));
+    // A halo HALO px wider than the glyph on each side, so small craft are easy to catch.
+    const HALO = 8;
+    const halo = div().id(`craft-halo-${a.address}`).absolute().left(-HALO).top(-HALO).w(box + 2 * HALO).h(box + 2 * HALO).rounded((box + 2 * HALO) / 2)
+      .cursor_pointer()
+      .on_hover((hovered, cx) => this.setHover(a.address, "halo", hovered, cx))
+      .on_click(focus);
     const leaderColor = c.parent ? C.border : `${hue}${lit ? "ff" : ORBIT_NEAR_ALPHA}`;
     const leader = div().absolute().top(box / 2).h(1).w(8).bg(leaderColor).when(quiet, (el) => el.opacity(0))
       .when(!flip, (el) => el.left(box + 1)).when(flip, (el) => el.right(box + 1));
     return div().id(`craft-${a.address}`).absolute()
       .left(f.x - box / 2).top(f.y - box / 2).w(box).h(box).p(5).opacity(f.opacity)
       .transition("left", dur).transition("top", dur).transition("width", dur).transition("height", dur).transition("opacity", dur)
-      .cursor_pointer()
-      .on_hover((hovered, cx) => { this.hover = hovered ? a.address : this.hover === a.address ? null : this.hover; cx.notify(); })
-      .on_click((_e, cx) => { if (this.dragged || this.demo) return; run("agent.focus", { terminal: a.address }); cx.notify(); })
+      .child(halo)
       .child(image(`${ASSET}/${glyph}.svg`).size_full())
       .child(ring)
       .child(leader)
       .child(tag);
+  }
+
+  // A craft is hovered while the pointer is on any of its parts. Entering the tag can land
+  // before or after leaving the halo, so each part reports alone and the craft stays lit
+  // until the last one is left.
+  setHover(address, part, hovered, cx) {
+    const key = `${address}|${part}`;
+    if (hovered) { this.hoverParts.add(key); this.hover = address; }
+    else {
+      this.hoverParts.delete(key);
+      if (this.hover === address && ![...this.hoverParts].some((k) => k.startsWith(`${address}|`))) {
+        const next = [...this.hoverParts].pop();
+        this.hover = next ? next.slice(0, next.lastIndexOf("|")) : null;
+      }
+    }
+    cx.notify();
   }
 
   ctxMeter(ctx) {
@@ -952,7 +982,7 @@ export default class FlightDeck extends View {
       return h_flex().id(`row-${a.address}`).h(ROW_H).flex_none().px(16).gap(12).items_center().cursor_pointer()
         .when(lit || a.focused, (el) => el.bg(C.surface3))
         .hover((st) => st.bg(C.surface3))
-        .on_hover((hovered, cx) => { this.hover = hovered ? a.address : this.hover === a.address ? null : this.hover; cx.notify(); })
+        .on_hover((hovered, cx) => this.setHover(a.address, "row", hovered, cx))
         .on_click((_e, cx) => { if (this.demo) return; run("agent.focus", { terminal: a.address }); cx.notify(); })
         .child(mono(10.5, C.fg3, 500).w(r.sub ? 40 : 24).flex_none().child(r.sub ? `  └ ${String(r.n).padStart(2, "0")}` : String(r.n).padStart(2, "0")))
         .child(div().w(104).flex_none().child(badge(a.status)))
