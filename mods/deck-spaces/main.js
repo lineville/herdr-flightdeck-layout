@@ -888,7 +888,14 @@ export default class Spaces extends View {
     if (!at) return null;
     const { s, groups } = at;
     if (this.folded.has(`s:${s.id}`)) return `s:${s.id}`;
-    const g = groups.find((g) => s.tabs.some((x) => x.active && g.tabs.includes(x.id)));
+    // The shown tab's worktree: the focused pane's, else (a chat has the focus) the one
+    // holding the tab's agent, else the first. A tab can span worktrees, main first.
+    const shownTab = s.tabs.find((x) => x.active)?.id;
+    const fpane = this.ps.find((p) => p.tab === shownTab && p.focused);
+    const inShown = groups.filter((g) => g.tabs.includes(shownTab));
+    const g = (fpane?.terminal && inShown.find((g) => g.panes.includes(fpane.pane)))
+      || (fpane && !fpane.terminal && inShown.find((g) => g.agents.some((a) => a.tab === shownTab)))
+      || inShown[0];
     if (!g) return `s:${s.id}`;
     if (g.done && !this.isOpen(`c:${s.id}`)) return `c:${s.id}`;
     const open = !this.folded.has(`w:${s.id}:${g.path}`);

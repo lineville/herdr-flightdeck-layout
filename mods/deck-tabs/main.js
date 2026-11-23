@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, agents, run, openOverlay, theme, window, shared, setShared, layout, settings, nextCommand } from "herdr";
+import { spaces, panes, agents, terminals, focused, run, openOverlay, theme, window, shared, setShared, layout, settings, nextCommand } from "herdr";
 
 const base = (p) => (p ?? "").replace(/\/+$/, "").split("/").pop();
 // Pi's session name from its title ("π - <name> - <folder>"), or null.
@@ -12,6 +12,19 @@ function piName(title, cwd) {
   if (folder && rest === folder) return null;
   if (folder && rest.endsWith(` - ${folder}`)) rest = rest.slice(0, -(folder.length + 3));
   return rest || null;
+}
+
+// The folder a split of the focused pane should open in when that pane is a mod (a
+// herdr-chat chat): the chat's host terminal in the same tab, else the tab's only
+// terminal. null for a terminal pane, which pane.split already opens in its own folder.
+export function splitFolder(ps, ts) {
+  const f = focused();
+  const fp = ps.find((p) => p.focused && (!f?.tab || p.tab === f.tab));
+  if (!fp || fp.terminal) return null;
+  const inTab = ps.filter((p) => p.tab === fp.tab && p.terminal && p.cwd);
+  const role = new Map(ts.map((t) => [t.address, t.labels?.["herdr-chat.role"]]));
+  const host = inTab.find((p) => role.get(p.terminal) === "host");
+  return (host ?? (inTab.length === 1 ? inTab[0] : null))?.cwd ?? null;
 }
 
 function find(node, id) {
@@ -33,7 +46,19 @@ export default class Tabs extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
-        if (c !== "files-search" && c?.name !== "files-search") continue;
+        const name = typeof c === "string" ? c : c?.name;
+        // `deck-tabs.split-right` / `split-down` (Cmd+D, Cmd+Shift+D): pane.split, except
+        // that a split of a chat opens in the chat's folder instead of the space's.
+        if (name === "split-right" || name === "split-down") {
+          const direction = name === "split-right" ? "right" : "down";
+          const folder = splitFolder(panes(), terminals());
+          try {
+            if (folder) run("terminal.open", { folder, place: direction });
+            else run("pane.split", { direction });
+          } catch {}
+          continue;
+        }
+        if (name !== "files-search") continue;
         run("layout.select", { stack: "panel-body", child: "files" });
         run("layout.show", { id: "panel" });
         setShared("files.search", Date.now());
