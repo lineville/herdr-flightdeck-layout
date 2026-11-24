@@ -191,8 +191,9 @@ export default class FlightDeck extends View {
     if (!this.demo) cx.spawn(async (cx) => {
       for (;;) {
         const ids = new Set(this.shown().map((s) => s.id));
-        const shownAgents = this.src.agents().filter((x) => ids.has(x.space));
-        const byAddress = new Map(this.src.terminals().map((t) => [t.address, t]));
+        const { crew, terms } = this.crewSnapshot();
+        const shownAgents = crew.filter((x) => ids.has(x.space));
+        const byAddress = new Map(terms.map((t) => [t.address, t]));
         this.chatOf = new Map();
         for (const a of shownAgents) {
           const chat = chatOf(byAddress.get(a.address));
@@ -285,11 +286,39 @@ export default class FlightDeck extends View {
     return c.startsWith("#") ? c : MARK[c] ?? C.fg3;
   }
 
-  sync(list) {
+  // Paneless sub-agents can report status in terminals() without appearing in agents().
+  crewSnapshot() {
+    const terms = this.src.terminals();
+    const crew = [...this.src.agents()];
+    const parents = new Map(terms.map((t) => [t.address, t.parent ?? null]));
+    const kids = new Map();
+    for (const t of terms) {
+      if (!t.parent || t.state !== "live") continue;
+      if (!kids.has(t.parent)) kids.set(t.parent, []);
+      kids.get(t.parent).push(t);
+    }
+    const seen = new Set(crew.map((a) => a.address));
+    const addKids = (address, anchor) => {
+      for (const t of kids.get(address) ?? []) {
+        if (seen.has(t.address)) continue;
+        seen.add(t.address);
+        const status = t.status === "error" ? "blocked" : t.status;
+        if (!Object.hasOwn(STATUS, status)) { addKids(t.address, anchor); continue; }
+        const a = { address: t.address, space: anchor.space, tab: anchor.tab, status,
+          title: t.name || t.template, app: t.report?.app, program: t.program };
+        parents.set(a.address, anchor.address);
+        crew.push(a);
+        addKids(t.address, a);
+      }
+    };
+    for (const a of [...crew]) addKids(a.address, a);
+    return { crew, parents, terms };
+  }
+
+  sync(list, parents, crew) {
     const now = this.clock();
-    const parents = new Map(this.src.terminals().map((t) => [t.address, t.parent ?? null]));
     const here = new Set(list.map((a) => a.address));
-    const live = new Set(this.src.agents().map((a) => a.address));
+    const live = new Set(crew.map((a) => a.address));
     let changed = false;
     for (const address of [...this.craft.keys()]) {
       if (!live.has(address)) { this.craft.delete(address); this.frame.delete(address); changed = true; }
@@ -452,19 +481,21 @@ export default class FlightDeck extends View {
       for (const c of tops) { c.rGoal = goals.get(c.address) ?? c.rGoal; this.advance(c, this.now); }
     }
     this.cam = this.cams.get(shown[0]?.id) ?? camera(vp.w, vp.h, this.look);
-    const crafted = new Map(this.src.agents().map((a) => [a.address, a]));
     for (const c of this.craft.values()) {
       const cam = this.cams.get(c.space);
       if (!cam) continue;
       const q = project(cam, this.worldAt(c, c.shown ? t : this.now));
-      const a = crafted.get(c.address);
+      const a = this.agentBy?.get(c.address);
       const look = modelLook(this.telemetry.get(c.address)?.model, a?.app ?? a?.program?.key);
       const least = many ? 10 : 14;
       const size = c.parent ? (many ? 9 : 12) : Math.max(least, Math.min(30, cam.planetPx * 0.2)) * look.size;
       const s = Math.round(size * q.scale);
       const off = Math.hypot(q.x - cam.cx, q.y - cam.cy);
+      // At a dock, draw active moons over the planet: their small orbits can sit
+      // inside the disc, especially when the camera is turned away from the pad.
+      const dockedMoon = IN_FLIGHT.has(c.phase) && this.craft.get(c.parent)?.phase === "parked";
       const hidden = q.behind && off < cam.planetPx * this.planetOf(c.space).size + s * 0.2;
-      this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: hidden ? 0 : q.behind ? 0.55 : 1 });
+      this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: dockedMoon ? 1 : hidden ? 0 : q.behind ? 0.55 : 1 });
     }
     // Rings for moons in flight, around where their parent will be at `t`.
     this.moonRings = [];
@@ -473,9 +504,9 @@ export default class FlightDeck extends View {
       const cam = this.cams.get(c.space);
       if (!p || !cam || (c.phase !== "orbit" && c.phase !== "hold")) continue;
       const pf = this.frame.get(p.address);
-      if (!pf || pf.opacity === 0) continue;
+      if (!pf || (pf.opacity === 0 && p.phase !== "parked")) continue;
       const ring = moonRing(cam, this.worldAt(p, p.shown ? t : this.now), this.orbit(c));
-      this.moonRings.push({ key: c.address, opacity: pf.opacity, ...ring });
+      this.moonRings.push({ key: c.address, opacity: p.phase === "parked" ? 1 : pf.opacity, ...ring });
     }
   }
 
@@ -542,10 +573,11 @@ export default class FlightDeck extends View {
       for (const key of keys) {
         const g = groups.get(key);
         if (g.wt) rows.push({ kind: "worktree", wt: g.wt, count: g.agents.length });
-        for (const a of g.agents) {
-          rows.push({ kind: "agent", a, n: ++n });
-          for (const b of mine.filter((x) => this.craft.get(x.address)?.parent === a.address)) rows.push({ kind: "agent", a: b, n: ++n, sub: true });
-        }
+        const addRow = (a, sub = false) => {
+          rows.push({ kind: "agent", a, n: ++n, sub });
+          for (const b of mine) if (this.craft.get(b.address)?.parent === a.address) addRow(b, true);
+        };
+        for (const a of g.agents) addRow(a);
       }
     }
     return rows;
@@ -556,13 +588,14 @@ export default class FlightDeck extends View {
   render() {
     const shown = this.shown();
     const ids = new Set(shown.map((s) => s.id));
-    const list = this.src.agents().filter((a) => ids.has(a.space));
+    const { crew, parents } = this.crewSnapshot();
+    const list = crew.filter((a) => ids.has(a.space));
     this.agentBy = new Map(list.map((a) => [a.address, a]));
     // A craft that leaves the view never reports the pointer leaving it.
     for (const k of this.hoverParts) if (!this.agentBy.has(k.slice(0, k.lastIndexOf("|")))) this.hoverParts.delete(k);
     if (this.hover && !this.agentBy.has(this.hover)) this.hover = null;
     this.cwd = new Map((this.demo ? [] : panes()).map((p) => [p.pane, p.cwd]));
-    this.sync(list);
+    this.sync(list, parents, crew);
     this.rows = this.buildRows(shown, list);
     const tabs = new Map(shown.flatMap((s) => s.tabs ?? []).map((t) => [t.id, t]));
 
