@@ -271,11 +271,59 @@ def pod_problem(p):
         w = (c.get("state") or {}).get("waiting")
         if w and w.get("reason") not in (None, "PodInitializing", "ContainerCreating"):
             return w["reason"]
+    # A pod made in the last 3 minutes that isn't failing yet is still starting.
+    young = time.time() - (iso(p["metadata"].get("creationTimestamp")) or 0) < STARTUP_S
     if phase != "Running":
-        return phase or "Unknown"
+        return "Starting" if young and phase == "Pending" else (phase or "Unknown")
     if not all(c.get("ready") for c in p["status"].get("containerStatuses") or []):
-        return "NotReady"
+        return "Starting" if young else "NotReady"
     return None
+
+
+STARTUP_S = 180
+NEXUS = "https://nexus.siftstack.net"
+
+
+def manifest_exists(base, repo, tag):
+    try:
+        req = urllib.request.Request(f"{base}/v2/{repo}/manifests/{tag}", method="HEAD", headers={"Accept": ACCEPT})
+        with urllib.request.urlopen(req, timeout=5):
+            return True
+    except urllib.error.HTTPError as e:
+        return False if e.code == 404 else None
+    except Exception:
+        return None
+
+
+def nearest_published(image, gitrepo, cache):
+    """For an azimuth image whose tag is in neither the kind registry nor nexus: the closest
+    first-parent ancestor of its commit that nexus has, as a tag. None when there is none
+    within 60 commits; False when the image does exist (or the registries can't be reached)."""
+    ref = image[len(IMAGE_PREFIX):]
+    name, _, tag = ref.partition(":")
+    key = f"{name}:{tag}"
+    known = cache.setdefault("published", {})
+    if key in known:
+        return known[key]
+    repo = f"sift-stack/azimuth/{name}"
+    local, nexus = manifest_exists(f"http://{REGISTRY}", repo, tag), manifest_exists(NEXUS, repo, tag)
+    if local is not False or nexus is not False:
+        return False
+    prefix, sha = (tag[:7], tag[7:]) if tag.startswith("source-") else ("", tag)
+    code, out, _ = sh(["git", "-C", gitrepo, "rev-list", "--first-parent", "-n", "60", sha], timeout=5)
+    if code:
+        return None
+    commits = out.split()[1:]
+    found = None
+    with ThreadPoolExecutor(10) as pool:
+        for i in range(0, len(commits), 10):
+            batch = commits[i:i + 10]
+            hits = list(pool.map(lambda c: manifest_exists(NEXUS, repo, prefix + c), batch))
+            found = next((prefix + c for c, ok in zip(batch, hits) if ok), None)
+            if found:
+                break
+    known[key] = found
+    return found
 
 
 def workload_lag(w):
@@ -366,28 +414,52 @@ RESTART = {"CrashLoopBackOff", "Error", "RunContainerError", "CreateContainerErr
 RETRY = {"ImagePullBackOff", "ErrImagePull", "Pending", "Unknown"}
 
 
-def heal_plan(pods, postgres_ok, aws):
-    """Steps that are safe to run on the local cluster: [{id, step, why, cmd, cwd?}]."""
+def heal_plan(pods, postgres_ok, aws, gitrepo, cache):
+    """Steps that are safe to run on the local cluster:
+    [{id, step, why, cmds | script, wait: [(ns, workload)]}]."""
     plan, restarted = [], set()
     if postgres_ok is False:
         plan.append({"id": "postgres", "step": "Elect a postgres leader", "why": "postgres endpoint has no leader",
                      "script": ["ops/kubernetes/klu/scripts/ensure-postgres-leader.sh"]})
+    kc = ["kubectl", "--context", CTX]
     for p in pods:
         reason = pod_problem(p)
-        if not reason or p["metadata"].get("deletionTimestamp"):
+        if not reason or reason == "Starting" or p["metadata"].get("deletionTimestamp"):
             continue
         ns, name, own = p["ns"], p["metadata"]["name"], owner(p)
+        wait = [(ns, own)] if own else []
+        delete = kc + ["-n", ns, "delete", "pod", name, "--wait=false"]
+        if reason in ("ImagePullBackOff", "ErrImagePull"):
+            # An image that was never published at this tag: pin the workload to the nearest
+            # published build, then recreate the pod (a StatefulSet won't replace a stuck one).
+            statuses = (p["status"].get("initContainerStatuses") or []) + (p["status"].get("containerStatuses") or [])
+            failing = [c for c in statuses if ((c.get("state") or {}).get("waiting") or {}).get("reason") in
+                       ("ImagePullBackOff", "ErrImagePull") and c.get("image", "").startswith(IMAGE_PREFIX)]
+            for c in failing:
+                tag = nearest_published(c["image"], gitrepo, cache)
+                if tag is False:
+                    continue
+                image = c["image"][len(IMAGE_PREFIX):].partition(":")
+                if not tag or not own:
+                    plan.append({"id": f"stuck:{ns}/{name}", "step": None, "why": f"{image[0]}:{image[2][:8]} isn't published, and no build within 60 commits is"})
+                    continue
+                if (ns, own) in restarted:
+                    continue
+                restarted.add((ns, own))
+                plan.append({"id": f"pin:{ns}/{own}", "step": f"Pin {own.split('/')[1]} to {tag.removeprefix('source-')[:8]}",
+                             "why": f"{image[2].removeprefix('source-')[:8]} isn't published",
+                             "cmds": [kc + ["-n", ns, "set", "image", own, f'{c["name"]}={IMAGE_PREFIX}{image[0]}:{tag}'], delete],
+                             "wait": wait})
+            if any(x["id"] in (f"pin:{ns}/{own}", f"stuck:{ns}/{name}") for x in plan):
+                continue
         if reason in RESTART and own and own.startswith("deployment/"):
             if (ns, own) not in restarted:
                 restarted.add((ns, own))
                 plan.append({"id": f"restart:{ns}/{own}", "step": f"Restart {own.split('/')[1]}", "why": f"{name}: {reason}",
-                             "cmd": ["kubectl", "--context", CTX, "-n", ns, "rollout", "restart", own]})
+                             "cmds": [kc + ["-n", ns, "rollout", "restart", own]], "wait": wait})
         elif reason in RESTART or reason in RETRY:
-            age = time.time() - (iso(p["metadata"].get("creationTimestamp")) or 0)
-            if reason == "Pending" and age < 180:
-                continue
             plan.append({"id": f"delete:{ns}/{name}", "step": f"Recreate {name}", "why": reason,
-                         "cmd": ["kubectl", "--context", CTX, "-n", ns, "delete", "pod", name, "--wait=false"]})
+                         "cmds": [delete], "wait": wait})
     if aws and aws["local"] == "ok" and aws["cluster"] == "stale":
         plan.append({"id": "aws", "step": "Push AWS creds to the cluster", "why": "cluster has older creds than ~/.aws",
                      "script": ["scripts/update_local_secrets.sh"]})
@@ -395,14 +467,28 @@ def heal_plan(pods, postgres_ok, aws):
 
 
 def run_plan(plan, repo):
-    done = []
+    """Runs each step, then waits (up to 2 minutes each) for the workloads it touched to roll out,
+    so the status read right after shows the result."""
+    done, waits = [], []
     for s in plan:
+        if not s.get("step"):
+            continue
         if "script" in s:
             code, out, err = sh(s["script"], timeout=300, cwd=repo)
         else:
-            code, out, err = sh(s["cmd"], timeout=60)
+            for cmd in s["cmds"]:
+                code, out, err = sh(cmd, timeout=60)
+                if code:
+                    break
         text = (err if code else out).strip().splitlines()
         done.append({"step": s["step"], "ok": code == 0, "detail": (text[-1] if text else "")[:200]})
+        if code == 0:
+            waits += [(len(done) - 1, ns, w) for ns, w in s.get("wait", [])]
+    for i, ns, w in waits:
+        code, out, err = kubectl("-n", ns, "rollout", "status", w, "--timeout=120s", timeout=130)
+        if code:
+            text = (err or out).strip().splitlines()
+            done[i] = {**done[i], "ok": False, "detail": f"not ready after 2 minutes: {(text[-1] if text else '')[:160]}"}
     return done
 
 
@@ -464,9 +550,10 @@ def main():
         out["app"] = f_app.result()
 
         # Health: pods that aren't running and ready, workloads short of replicas, rollouts in flight.
+        problems = [(p, r) for p in pods if (r := pod_problem(p))]
         out["pods"] = {"total": sum(1 for p in pods if p["status"].get("phase") != "Succeeded"),
-                       "bad": [{"name": p["metadata"]["name"], "ns": p["ns"], "reason": r}
-                               for p in pods if (r := pod_problem(p))]}
+                       "bad": [{"name": p["metadata"]["name"], "ns": p["ns"], "reason": r} for p, r in problems if r != "Starting"],
+                       "starting": [p["metadata"]["name"] for p, r in problems if r == "Starting"]}
         out["rolling"] = [w["name"] for w in workloads if w["rolling"]]
         out["short"] = [w for w in workloads if w["ready"] < w["want"] and not w["rolling"]]
 
@@ -494,11 +581,15 @@ def main():
         code, pg, _ = f_pg.result()
         postgres_ok = None if code else bool(pg.strip())
         out["postgres"] = postgres_ok
-        plan = heal_plan(pods, postgres_ok, out["aws"])
+        plan = heal_plan(pods, postgres_ok, out["aws"], repo, cache)
+        if json.dumps(cache, sort_keys=True) != before:
+            save_cache(cache)
         if a.heal:
-            print(json.dumps({"healed": run_plan(plan, repo) or [{"step": "Nothing to heal", "ok": True, "detail": ""}]}))
+            stuck = [{"step": "Can't heal", "ok": False, "detail": s["why"]} for s in plan if not s.get("step")]
+            print(json.dumps({"healed": (run_plan(plan, repo) + stuck) or [{"step": "Nothing to heal", "ok": True, "detail": ""}]}))
             return
-        out["heal"] = [{"step": s["step"], "why": s["why"]} for s in plan]
+        out["heal"] = [{"step": s["step"], "why": s["why"]} for s in plan if s.get("step")]
+        out["unhealable"] = [s["why"] for s in plan if not s.get("step")]
         sources = list(pool.map(lambda kv: (kv[0], image_source(kv[0], kv[1]["digest"], cache)), images.items()))
         if json.dumps(cache, sort_keys=True) != before:
             save_cache(cache)

@@ -63,13 +63,16 @@ export default class KindStatus extends View {
     // Tick often; fetch on the slow cadence, or the fast one while a deploy or rollout runs.
     cx.timer.every(BUSY_MS, (cx) => {
       if (window()?.visible === false) return;
-      const wait = this.deploying() || this.healing || Date.now() < this.fastUntil ? BUSY_MS : IDLE_MS;
+      const wait = this.deploying() || this.healing || this.data?.pods?.starting?.length || Date.now() < this.fastUntil ? BUSY_MS : IDLE_MS;
       if (Date.now() - this.last >= wait - 500) this.refresh(cx);
     });
   }
 
+  // A refresh asked for while one runs (after a heal, say) runs again once that one ends,
+  // so the card never keeps data read before the change.
   refresh(cx) {
-    if (this.busy || this.demo) return;
+    if (this.demo) return;
+    if (this.busy) { this.again = true; return; }
     this.busy = true;
     this.last = Date.now();
     cx.spawn(async (cx) => {
@@ -86,6 +89,7 @@ export default class KindStatus extends View {
       // The last heal's results show for 3 minutes.
       if (this.healed && Date.now() - this.healedAt > 3 * 60 * 1000) this.healed = null;
       cx.notify();
+      if (this.again) { this.again = false; this.refresh(cx); }
     });
   }
 
@@ -153,13 +157,16 @@ export default class KindStatus extends View {
     const reasons = [];
     if (d.app !== 200) reasons.push(d.app ? `app.sift.test returned ${d.app}` : "app.sift.test not answering");
     if (d.pods?.bad?.length) reasons.push(`${d.pods.bad.length} pod${d.pods.bad.length === 1 ? "" : "s"} not ready`);
+    for (const u of d.unhealable ?? []) reasons.push(`Heal can't fix: ${u}`);
     const a = d.agents ?? {};
     if (a.want != null && a.ready < a.want) reasons.push(`${a.ready}/${a.want} agent pods ready`);
     if (a.free != null && a.free < (d.min_free ?? 2)) reasons.push(`${a.free} free agent pod${a.free === 1 ? "" : "s"}`);
     if (d.postgres === false) reasons.push("postgres has no leader");
     const aws = this.awsState();
     if (aws.level !== "ok") reasons.push(aws.reason);
+    if (this.healing) return { level: "deploying", label: "Healing", reasons };
     if (this.deploying()) return { level: "deploying", label: "Deploying", reasons };
+    if (d.pods?.starting?.length && !reasons.length) return { level: "deploying", label: "Starting", reasons: [`${d.pods.starting.length} pod${d.pods.starting.length === 1 ? "" : "s"} starting`] };
     return reasons.length ? { level: "degraded", label: "Degraded", reasons } : { level: "healthy", label: "Healthy", reasons };
   }
 
@@ -186,7 +193,8 @@ export default class KindStatus extends View {
     const groups = this.groups();
     const g = groups[0];
     const dep = d?.deploys?.[0];
-    const name = dep
+    const name = this.healing ? "Healing"
+      : dep
       ? `${(SCRIPT[dep.script] ?? dep.script).replace("Setting up cluster", "Setup")}${dep.targets?.length ? ` ${dep.targets.join(", ")}` : ""}`
       : st.level === "down" ? st.label
       : g ? g.key
@@ -284,8 +292,9 @@ export default class KindStatus extends View {
     const bad = d.pods?.bad ?? [];
     const health = [
       this.row(t, "app.sift.test", d.app ?? "no answer", d.app === 200 ? t.foreground : t.blocked),
-      this.row(t, "Pods ready", `${(d.pods?.total ?? 0) - bad.length}/${d.pods?.total ?? 0}`, bad.length ? t.blocked : t.foreground),
+      this.row(t, "Pods ready", `${(d.pods?.total ?? 0) - bad.length - (d.pods?.starting?.length ?? 0)}/${d.pods?.total ?? 0}`, bad.length ? t.blocked : t.foreground),
       ...bad.slice(0, 5).map((p) => this.row(t, `  ${p.name}`, p.reason, t.blocked)),
+      ...(d.pods?.starting ?? []).slice(0, 3).map((n) => this.row(t, `  ${n}`, "starting", t.working)),
     ];
     if (bad.length > 5) health.push(this.note(t, `  +${bad.length - 5} more`, t.dim));
     if (d.jobs_failed?.length) health.push(this.note(t, `Failed jobs: ${d.jobs_failed.join(", ")}`, t.dim));
@@ -305,9 +314,8 @@ export default class KindStatus extends View {
       .child(this.button("kc-refresh", "Refresh", t, (cx) => this.refresh(cx), { busy: this.busy }))
       .when(Boolean(d.heal?.length) || this.healing, (el) => el.child(
         this.button("kc-heal", this.healing ? "Healing" : `Heal (${d.heal.length})`, t, (cx) => this.heal(cx), { primary: true, busy: this.healing })))
-      .child(this.button("kc-aws", "AWS login", t, () => this.awsLogin(), { primary: this.awsState().level === "bad" }))
-      .child(div().flex_1())
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(this.busy ? "Refreshing" : `Updated ${ago(d.at)}`)));
+      .child(this.button("kc-aws", "AWS login", t, () => this.awsLogin(), { primary: this.awsState().level === "bad" })));
+    rows.push(this.note(t, this.busy ? "Refreshing" : `Updated ${ago(d.at)}`, t.dim));
     return this.surface(t, rows);
   }
 
@@ -329,8 +337,9 @@ export default class KindStatus extends View {
           .when(!s.ok && Boolean(s.detail), (el) => el.tooltip(s.detail))))];
     }
     if (!d.heal?.length) return [];
-    return [this.section("Heal will", t, d.heal.slice(0, 6).map((s) => this.row(t, s.step, null)
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(s.why))))];
+    return [this.section("Heal will", t, d.heal.slice(0, 6).map((s) => v_flex()
+      .child(this.row(t, s.step, null))
+      .child(this.note(t, s.why, t.dim))))];
   }
 
   surface(t, rows) {
