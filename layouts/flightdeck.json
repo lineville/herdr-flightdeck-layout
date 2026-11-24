@@ -183,6 +183,16 @@
               }
             },
             {
+              "id": "kind",
+              "type": "block",
+              "content": {
+                "mod": "kind-status"
+              },
+              "size": {
+                "px": 270
+              }
+            },
+            {
               "id": "usage",
               "type": "block",
               "content": {
