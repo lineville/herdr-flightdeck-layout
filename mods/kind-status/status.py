@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Prints the local kind stack's status as one JSON line.
 
-  status.py [--repo <azimuth checkout>] [--min-free <n>]
+  status.py [--repo <azimuth checkout>] [--min-free <n>] [--heal]
+
+With --heal it probes again, runs the heal plan the probe suggests, and prints
+{ healed: [{ step, ok, detail }] } instead of the status.
 
 What it reads, all local:
   - kubectl --context kind-kind: pods, deployments, statefulsets in sift and
@@ -14,6 +17,10 @@ What it reads, all local:
   - ps + lsof, to find a running deploy script and the worktree it runs in.
   - postgres-0 (azimuth db): active agent pod leases, to count free agent pods.
   - https://app.sift.test, expecting a 200.
+  - AWS: `aws sts get-caller-identity` for the profile the cluster uses (the
+    sift/bedrock-local-aws secret's `profile`), cached until ~/.aws/credentials
+    changes or 5 minutes pass, and whether that secret holds the same access key
+    id as ~/.aws/credentials. No key material is printed.
 
 Provenance is cached by manifest digest under ~/Library/Caches/herdr-kind-status.
 """
@@ -139,6 +146,12 @@ def load_cache():
             return json.load(f)
     except Exception:
         return {}
+
+
+def save_cache(cache):
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    with open(CACHE, "w") as f:
+        json.dump(cache, f)
 
 
 def provenance(repo, index_digest, cache):
@@ -285,6 +298,114 @@ def leased_ips():
     return set(out.split()) if code == 0 else None
 
 
+def aws_status(cache):
+    res = aws_check(cache)
+    # The login command: aws-login for this profile, with the account/role of the last good login.
+    ident = (cache.get("aws_identity") or {}).get(res["profile"])
+    res["login"] = ["aws-login", "-profile", res["profile"]] + (
+        ["-account-role", f'{ident["account"]}/{ident["role"]}'] if ident else []) + ["-n"]
+    return res
+
+
+def aws_check(cache):
+    """{profile, local: ok|expired|invalid|missing|unknown, cluster: synced|stale|missing|unknown, age}."""
+    import base64
+    import configparser
+    path = os.path.expanduser(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", "~/.aws/credentials"))
+    code, out, _ = kubectl("-n", "sift", "get", "secret", "bedrock-local-aws", "-o", "json")
+    secret = json.loads(out).get("data", {}) if code == 0 else None
+    dec = lambda k: base64.b64decode(secret[k]).decode() if secret and k in secret else None
+    profile = dec("profile") or "default"
+    res = {"profile": profile, "local": "missing", "cluster": "unknown" if secret is None else "missing", "age": None}
+    try:
+        mtime = os.path.getmtime(path)
+        local = configparser.ConfigParser()
+        local.read(path)
+        local_key = local.get(profile, "aws_access_key_id", fallback=None)
+    except OSError:
+        return res
+    res["age"] = int(time.time() - mtime)
+    if not local_key:
+        return res
+    if secret is not None and dec("credentials"):
+        remote = configparser.ConfigParser()
+        remote.read_string(dec("credentials"))
+        keys = {remote.get(s, "aws_access_key_id", fallback=None) for s in remote.sections()}
+        res["cluster"] = "synced" if local_key in keys else "stale"
+    c = cache.get("aws") or {}
+    if c.get("profile") == profile and c.get("mtime") == mtime and time.time() - c.get("at", 0) < 300 and c.get("local") == "ok" \
+            and profile in (cache.get("aws_identity") or {}):
+        res["local"] = "ok"
+        return res
+    code, out, err = sh(["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"], timeout=10)
+    if code == 0:
+        try:
+            who = json.loads(out)
+            role = re.search(r"assumed-role/AWSReservedSSO_(.+?)_[0-9a-f]+/", who.get("Arn", ""))
+            if role:
+                cache.setdefault("aws_identity", {})[profile] = {"account": who["Account"], "role": role.group(1)}
+        except (ValueError, KeyError):
+            pass
+    res["local"] = ("ok" if code == 0 else "expired" if "Expired" in err
+                    else "invalid" if "InvalidClientTokenId" in err or "SignatureDoesNotMatch" in err else "unknown")
+    cache["aws"] = {"profile": profile, "mtime": mtime, "at": time.time(), "local": res["local"]}
+    return res
+
+
+def owner(p):
+    for o in p["metadata"].get("ownerReferences") or []:
+        if o.get("kind") == "ReplicaSet":
+            return f'deployment/{o["name"].rsplit("-", 1)[0]}'
+        if o.get("kind") in ("StatefulSet", "DaemonSet"):
+            return f'{o["kind"].lower()}/{o["name"]}'
+    return None
+
+
+RESTART = {"CrashLoopBackOff", "Error", "RunContainerError", "CreateContainerError",
+           "CreateContainerConfigError", "NotReady", "OOMKilled"}
+RETRY = {"ImagePullBackOff", "ErrImagePull", "Pending", "Unknown"}
+
+
+def heal_plan(pods, postgres_ok, aws):
+    """Steps that are safe to run on the local cluster: [{id, step, why, cmd, cwd?}]."""
+    plan, restarted = [], set()
+    if postgres_ok is False:
+        plan.append({"id": "postgres", "step": "Elect a postgres leader", "why": "postgres endpoint has no leader",
+                     "script": ["ops/kubernetes/klu/scripts/ensure-postgres-leader.sh"]})
+    for p in pods:
+        reason = pod_problem(p)
+        if not reason or p["metadata"].get("deletionTimestamp"):
+            continue
+        ns, name, own = p["ns"], p["metadata"]["name"], owner(p)
+        if reason in RESTART and own and own.startswith("deployment/"):
+            if (ns, own) not in restarted:
+                restarted.add((ns, own))
+                plan.append({"id": f"restart:{ns}/{own}", "step": f"Restart {own.split('/')[1]}", "why": f"{name}: {reason}",
+                             "cmd": ["kubectl", "--context", CTX, "-n", ns, "rollout", "restart", own]})
+        elif reason in RESTART or reason in RETRY:
+            age = time.time() - (iso(p["metadata"].get("creationTimestamp")) or 0)
+            if reason == "Pending" and age < 180:
+                continue
+            plan.append({"id": f"delete:{ns}/{name}", "step": f"Recreate {name}", "why": reason,
+                         "cmd": ["kubectl", "--context", CTX, "-n", ns, "delete", "pod", name, "--wait=false"]})
+    if aws and aws["local"] == "ok" and aws["cluster"] == "stale":
+        plan.append({"id": "aws", "step": "Push AWS creds to the cluster", "why": "cluster has older creds than ~/.aws",
+                     "script": ["scripts/update_local_secrets.sh"]})
+    return plan
+
+
+def run_plan(plan, repo):
+    done = []
+    for s in plan:
+        if "script" in s:
+            code, out, err = sh(s["script"], timeout=300, cwd=repo)
+        else:
+            code, out, err = sh(s["cmd"], timeout=60)
+        text = (err if code else out).strip().splitlines()
+        done.append({"step": s["step"], "ok": code == 0, "detail": (text[-1] if text else "")[:200]})
+    return done
+
+
 def app_check():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -302,8 +423,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=os.path.expanduser("~/Documents/code/azimuth"))
     ap.add_argument("--min-free", type=int, default=2)
+    ap.add_argument("--heal", action="store_true")
     a = ap.parse_args()
     repo = os.path.expanduser(a.repo)
+    cache = load_cache()
+    before = json.dumps(cache, sort_keys=True)
 
     with ThreadPoolExecutor(8) as pool:
         f_dep = pool.submit(deploys)
@@ -312,6 +436,8 @@ def main():
         f_ns = {ns: pool.submit(kubectl, "-n", ns, "get", "pods,deployments,statefulsets,jobs", "-o", "json") for ns in NAMESPACES}
         f_base = pool.submit(kubectl, "-n", "sift", "get", "configmap", "local-dev-baseline", "-o", "jsonpath={.data.image_sha}")
         f_leases = pool.submit(leased_ips)
+        f_aws = pool.submit(aws_status, cache)
+        f_pg = pool.submit(kubectl, "-n", "sift", "get", "endpoints", "postgres", "-o", "jsonpath={.subsets[*].addresses[*].ip}")
         trees = f_trees.result()
         out = {"at": int(time.time()), "repo": repo, "min_free": a.min_free,
                "deploys": [{**d, "source": folder_worktree(d["folder"], repo, trees)} for d in f_dep.result()]}
@@ -320,6 +446,10 @@ def main():
         for ns, f in f_ns.items():
             code, stdout, err = f.result()
             if code:
+                if a.heal:
+                    print(json.dumps({"healed": [{"step": "Reach the cluster", "ok": False, "detail": "kubectl can't reach kind-kind"}]}))
+                    return
+                out["aws"] = f_aws.result()
                 out["error"] = "down" if ("refused" in err or "Unable to connect" in err or "timeout" in err.lower()) else (err.strip().splitlines() or ["kubectl failed"])[-1][:160]
                 print(json.dumps(out))
                 return
@@ -360,13 +490,18 @@ def main():
                 if img.startswith(IMAGE_PREFIX):
                     digest = (c.get("imageID") or "").rpartition("@")[2] or None
                     images.setdefault(img, {"digest": digest})
-        cache = load_cache()
-        before = len(cache)
+        out["aws"] = f_aws.result()
+        code, pg, _ = f_pg.result()
+        postgres_ok = None if code else bool(pg.strip())
+        out["postgres"] = postgres_ok
+        plan = heal_plan(pods, postgres_ok, out["aws"])
+        if a.heal:
+            print(json.dumps({"healed": run_plan(plan, repo) or [{"step": "Nothing to heal", "ok": True, "detail": ""}]}))
+            return
+        out["heal"] = [{"step": s["step"], "why": s["why"]} for s in plan]
         sources = list(pool.map(lambda kv: (kv[0], image_source(kv[0], kv[1]["digest"], cache)), images.items()))
-        if len(cache) != before:
-            os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-            with open(CACHE, "w") as f:
-                json.dump(cache, f)
+        if json.dumps(cache, sort_keys=True) != before:
+            save_cache(cache)
 
     services = []
     for img, src in sources:
