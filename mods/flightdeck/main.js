@@ -2,7 +2,7 @@
 // are craft that launch when they start work, orbit while they work, hold when they need
 // you, and land when they are done. Orbits are muted gray dotted rings; each craft's tag
 // takes its worktree's color, so craft working in one branch share a hue. Sub-agents circle
-// their parent.
+// their parent in flight, or the planet when their parent is docked.
 // Fleet mode lays the planets out on a grid that fits the view; System mode shows one.
 // Styled dark and flat: grayscale chrome, one cyan accent (#2EE6FF), IBM Plex Sans and Mono.
 // Planets are the one place with colour: each space gets its own world from planets/.
@@ -370,8 +370,13 @@ export default class FlightDeck extends View {
     if (changed) { this.place(this.clock(), 300); this.wake?.(); }
   }
 
+  orbitParent(c) {
+    const p = this.craft.get(c.parent);
+    return p && p.phase !== "parked" ? p : null;
+  }
+
   orbit(c) {
-    return c.parent ? moonOrbitOf(c.slot) : orbitOf(c.slot, c.r);
+    return this.orbitParent(c) ? moonOrbitOf(c.slot) : orbitOf(c.slot, c.r);
   }
 
   advance(c, now) {
@@ -383,6 +388,7 @@ export default class FlightDeck extends View {
       c.r = c.rGoal;
     }
     c.rAt = now;
+    c.period = this.orbit(c).period;
   }
 
   anchor(c, t) {
@@ -417,13 +423,20 @@ export default class FlightDeck extends View {
   angleAt(c, t) {
     if (c.phase === "hold") return c.holdTheta;
     if (c.phase === "launch") return c.theta;
-    return c.theta + (TAU * (t - c.thetaAt)) / this.orbit(c).period;
+    return c.theta + (TAU * (t - c.thetaAt)) / (c.period ?? this.orbit(c).period);
   }
 
   worldAt(c, t) {
+    // Launch and landing still use the parent's pad, even on a planet-centered orbit.
+    const anchor = this.anchor(c, t);
+    if (c.phase === "parked") return add(anchor, this.pad(c));
+    if (c.phase === "land") {
+      if (t >= c.t0 + LAND_MS) { c.phase = "parked"; c.from = null; return add(anchor, this.pad(c)); }
+      const from = add(c.from, scale(anchor, -1));
+      return add(anchor, descent(from, this.pad(c), clamp01((t - c.t0) / LAND_MS)));
+    }
+    const base = this.orbitParent(c) ? anchor : [0, 0, 0];
     const o = this.orbit(c);
-    const base = this.anchor(c, t);
-    if (c.phase === "parked") return add(base, this.pad(c));
     if (c.phase === "hold") return add(base, orbitPoint(o, c.holdTheta));
     if (c.phase === "launch") {
       const s = clamp01((t - c.t0) / LAUNCH_MS);
@@ -435,13 +448,8 @@ export default class FlightDeck extends View {
         c.rAt = c.thetaAt;
         return this.worldAt(c, t);
       }
-      const start = c.from ? add(c.from, [-base[0], -base[1], -base[2]]) : this.pad(c);
+      const start = add(c.from ?? add(anchor, this.pad(c)), scale(base, -1));
       return add(base, ascent(start, orbitPoint(o, c.theta), s));
-    }
-    if (c.phase === "land") {
-      if (t >= c.t0 + LAND_MS) { c.phase = "parked"; c.from = null; return add(base, this.pad(c)); }
-      const from = add(c.from, [-base[0], -base[1], -base[2]]);
-      return add(base, descent(from, this.pad(c), clamp01((t - c.t0) / LAND_MS)));
     }
     return add(base, orbitPoint(o, this.angleAt(c, t)));
   }
@@ -476,9 +484,11 @@ export default class FlightDeck extends View {
       cam.cx += cell.x;
       cam.cy += cell.y;
       this.cams.set(cell.space.id, cam);
-      const tops = [...this.craft.values()].filter((c) => c.space === cell.space.id && !c.parent);
-      const goals = spreadRadii(tops.map((c) => ({ key: c.address, r: radiusFor(this.telemetry.get(c.address)?.ctx ?? 0) })));
-      for (const c of tops) { c.rGoal = goals.get(c.address) ?? c.rGoal; this.advance(c, this.now); }
+      const craft = [...this.craft.values()].filter((c) => c.space === cell.space.id);
+      const wanted = (c) => radiusFor(this.telemetry.get(c.address)?.ctx ?? 0);
+      const planetOrbits = craft.filter((c) => !c.parent || (IN_FLIGHT.has(c.phase) && !this.orbitParent(c)));
+      const goals = spreadRadii(planetOrbits.map((c) => ({ key: c.address, r: wanted(c) })));
+      for (const c of craft) { c.rGoal = goals.get(c.address) ?? wanted(c); this.advance(c, this.now); }
     }
     this.cam = this.cams.get(shown[0]?.id) ?? camera(vp.w, vp.h, this.look);
     for (const c of this.craft.values()) {
@@ -491,22 +501,19 @@ export default class FlightDeck extends View {
       const size = c.parent ? (many ? 9 : 12) : Math.max(least, Math.min(30, cam.planetPx * 0.2)) * look.size;
       const s = Math.round(size * q.scale);
       const off = Math.hypot(q.x - cam.cx, q.y - cam.cy);
-      // At a dock, draw active moons over the planet: their small orbits can sit
-      // inside the disc, especially when the camera is turned away from the pad.
-      const dockedMoon = IN_FLIGHT.has(c.phase) && this.craft.get(c.parent)?.phase === "parked";
       const hidden = q.behind && off < cam.planetPx * this.planetOf(c.space).size + s * 0.2;
-      this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: dockedMoon ? 1 : hidden ? 0 : q.behind ? 0.55 : 1 });
+      this.frame.set(c.address, { x: q.x, y: q.y, s, opacity: hidden ? 0 : q.behind ? 0.55 : 1 });
     }
     // Rings for moons in flight, around where their parent will be at `t`.
     this.moonRings = [];
     for (const c of this.craft.values()) {
-      const p = c.parent && this.craft.get(c.parent);
+      const p = this.orbitParent(c);
       const cam = this.cams.get(c.space);
       if (!p || !cam || (c.phase !== "orbit" && c.phase !== "hold")) continue;
       const pf = this.frame.get(p.address);
-      if (!pf || (pf.opacity === 0 && p.phase !== "parked")) continue;
+      if (!pf || pf.opacity === 0) continue;
       const ring = moonRing(cam, this.worldAt(p, p.shown ? t : this.now), this.orbit(c));
-      this.moonRings.push({ key: c.address, opacity: p.phase === "parked" ? 1 : pf.opacity, ...ring });
+      this.moonRings.push({ key: c.address, opacity: pf.opacity, ...ring });
     }
   }
 
@@ -673,16 +680,16 @@ export default class FlightDeck extends View {
 
   cockpit(vp, shown, list, tabs) {
     const { yaw, pitch, zoom } = this.look;
-    const tops = [...this.craft.values()].filter((c) => this.cams.has(c.space) && !c.parent && IN_FLIGHT.has(c.phase));
-    const key = `${vp.w}x${vp.h}:${yaw}:${pitch}:${zoom}:${this.cells.map((c) => `${c.space.id}@${c.x},${c.y},${c.w},${c.h}`).join("|")}:${tops.map((c) => `${c.space}/${c.slot}@${c.r.toFixed(2)}`).sort().join(",")}`;
+    const planetOrbits = [...this.craft.values()].filter((c) => this.cams.has(c.space) && !this.orbitParent(c) && IN_FLIGHT.has(c.phase));
+    const key = `${vp.w}x${vp.h}:${yaw}:${pitch}:${zoom}:${this.cells.map((c) => `${c.space.id}@${c.x},${c.y},${c.w},${c.h}`).join("|")}:${planetOrbits.map((c) => `${c.space}/${c.slot}@${c.r.toFixed(2)}`).sort().join(",")}`;
     if (!this.orbitCache || this.orbitCache.key !== key) {
       const build = (runs) => runs.filter((r) => r.length > 1).map((r) => {
         let path = PathBuilder.stroke(this.cells.length > 1 ? 1.2 : 1.5).dash_array(ORBIT_DOTS).move_to(r[0][0], r[0][1]);
         for (const pt of r.slice(1)) path = path.line_to(pt[0], pt[1]);
         return path.build();
       });
-      const rings = tops.map((c) => {
-        const p = orbitPaths(this.cams.get(c.space), orbitOf(c.slot, c.r));
+      const rings = planetOrbits.map((c) => {
+        const p = orbitPaths(this.cams.get(c.space), this.orbit(c));
         return { far: build(p.far), near: build(p.near), farColor: `${ORBIT_GRAY}${ORBIT_FAR_ALPHA}`, nearColor: `${ORBIT_GRAY}${ORBIT_NEAR_ALPHA}` };
       });
       this.orbitCache = { key, rings };
