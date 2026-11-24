@@ -823,11 +823,12 @@ export default class FlightDeck extends View {
   }
 
   flightWord(a, c, tabs) {
-    if (c.phase === "launch") return ["LAUNCH", C.accent];
+    const own = this.spaceColor(c.space); // the planet label's color, so a craft reads as its system's
+    if (c.phase === "launch") return ["LAUNCH", own];
     if (c.phase === "land") return ["DESCENT", C.fg2];
     if (a.status === "working") {
       const since = tabs.get(a.tab)?.working_since;
-      return [since ? `ORBIT T+${clock((this.now ?? this.clock()) - since)}` : "ORBIT", C.accent];
+      return [since ? `ORBIT T+${clock((this.now ?? this.clock()) - since)}` : "ORBIT", own];
     }
     if (a.status === "blocked") return ["HOLD · NEEDS YOU", C.warning];
     if (a.status === "done") return ["LANDED", C.success];
@@ -855,7 +856,7 @@ export default class FlightDeck extends View {
     const lit = this.hover === a.address || a.focused;
     let ring;
     if (c.phase === "launch" || c.phase === "orbit") {
-      ring = svg(`${ASSET}/arc.svg`).absolute().left(0).top(0).size_full().text_color(C.accent).spin(1400 / this.speed);
+      ring = svg(`${ASSET}/arc.svg`).absolute().left(0).top(0).size_full().text_color(this.spaceColor(c.space)).spin(1400 / this.speed);
     } else if (c.phase === "hold") {
       ring = svg(`${ASSET}/ring.svg`).absolute().left(0).top(0).size_full().text_color(C.warning).loop("opacity", { from: 0.25, to: 1, period: 1400 / this.speed });
     } else if (c.phase === "land") {
