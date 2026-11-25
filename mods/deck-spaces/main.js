@@ -224,7 +224,10 @@ function subStatus(k, listed) {
 // nothing else rerenders for it.
 const SHIMMER_CYCLE_MS = 2200; // one sweep plus the pause before the next
 const SHIMMER_SWEEP_MS = 1700; // the part of the cycle the band is moving
-const SHIMMER_FRAME_MS = 33; // ~30fps: about 8% of a core over idle; 16ms (60fps) cost about 26%
+// Each step notifies a view, and Herdr redraws the whole window for it (herdr-app#413), which
+// delays terminal echo while typing. 100ms (10fps) keeps the sweep readable at a third of
+// 30fps's redraws; 33ms cost about 8% of a core over idle, 16ms about 26%.
+const SHIMMER_FRAME_MS = 100;
 // [slot width as % of the row, opacity]; stacked, the center is about 90% `hi`.
 const SHIMMER_BANDS = [[44, 0.14], [34, 0.18], [25, 0.24], [17, 0.3], [10, 0.38], [5, 0.45]];
 
